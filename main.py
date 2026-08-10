@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from brand_parser import parse_geo_answer
+from diagnosis_analyzer import diagnose as run_geo_diagnosis
 
 try:
     from dotenv import load_dotenv
@@ -145,6 +146,25 @@ def parse_geo(req: ParseRequest):
     完全不修改、不依赖 raw_answer 的原始内容，只读取。
     """
     return parse_geo_answer(req.raw_answer, req.model)
+
+
+class DiagnoseRequest(BaseModel):
+    question: str
+    raw_answer: str
+    model: str = ""
+
+
+@app.post("/api/diagnose/geo")
+def diagnose_geo(req: DiagnoseRequest):
+    """
+    GEO诊断分析：在 parse_geo 的结构化解析结果之上，进一步给出
+    Query Intent 分类 / 回答匹配度 / 行业认知质量 / GEO Gap / 诊断结论 / 改善建议。
+    深度诊断（20题批量）未来接入时也应复用同一条 brand_parser -> diagnosis_analyzer 链路，
+    不另起一套判断逻辑。
+    """
+    parsed = parse_geo_answer(req.raw_answer, req.model)
+    diagnosis = run_geo_diagnosis(req.question, req.raw_answer, parsed)
+    return {"parsed": parsed, "diagnosis": diagnosis}
 
 
 # 把 static/ 目录里的前端网页一并托管出去，浏览器访问 http://127.0.0.1:8000/ 即可打开。
