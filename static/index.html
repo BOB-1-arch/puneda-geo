@@ -194,6 +194,20 @@ async function askDeepSeek(question) {
   return res.json();
 }
 
+async function parseGeo(rawAnswer, model) {
+  const res = await fetch(BACKEND_URL + "/api/parse/geo", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ raw_answer: rawAnswer, model }),
+  });
+  if (!res.ok) {
+    let detail = "解析失败（状态码 " + res.status + "）";
+    try { const err = await res.json(); if (err.detail) detail = err.detail; } catch (e) {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
 /* ---------------- 交互逻辑 ---------------- */
 
 function setMarket(m) { state.market = m; state.quickResults = null; state.deepMessages = null; render(); }
@@ -230,6 +244,12 @@ async function startQuick() {
         entry.answer = data.raw_answer;
         entry.model = data.model;
         entry.time = new Date().toLocaleString("zh-CN", { hour12: false });
+        render();
+        try {
+          entry.parsed = await parseGeo(data.raw_answer, data.model);
+        } catch (e) {
+          entry.parseError = e.message;
+        }
       } catch (e) {
         entry.phase = "error";
         entry.error = e.message;
@@ -329,6 +349,41 @@ function renderDashboard() {
   return html;
 }
 
+function renderParsedGeo(parsed, parseError) {
+  if (parseError) {
+    return `<div class="qa-meta" style="color:#B23A2E;">GEO结构化解析失败 — ${escapeHtml(parseError)}</div>`;
+  }
+  if (!parsed) {
+    return `<div class="qa-meta">GEO结构化解析中…</div>`;
+  }
+  const mentionBadge = parsed.brand_mentioned
+    ? `<span class="badge badge-connected"><span class="d"></span>品牌已提及（${parsed.mention_count}次）</span>`
+    : `<span class="badge badge-not"><span class="d"></span>品牌未提及</span>`;
+  const recBadge = parsed.recommended
+    ? `<span class="badge badge-connected"><span class="d"></span>判定为推荐</span>`
+    : `<span class="badge badge-not"><span class="d"></span>未判定为推荐</span>`;
+  const rankText = parsed.rank != null ? `第 ${parsed.rank} 位` : "无法判断";
+  const competitorsHtml = parsed.competitors.length
+    ? parsed.competitors.map(c => `<span class="type-tag">${escapeHtml(c)}</span>`).join("")
+    : `<span style="color:#9A9C92;font-size:12px;">未识别到竞品</span>`;
+  const citationsHtml = parsed.citations.length
+    ? parsed.citations.map(u => `<div style="font-size:12px;word-break:break-all;padding:2px 0;"><a href="${escapeHtml(u)}" target="_blank" rel="noopener noreferrer">${escapeHtml(u)}</a></div>`).join("")
+    : `<span style="color:#9A9C92;font-size:12px;">未识别到引用来源</span>`;
+
+  return `
+    <div style="margin-top:10px;padding-top:10px;border-top:1px dashed #EFF0E9;">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
+        ${mentionBadge}${recBadge}
+        <span class="badge" style="background:#F5F6F1;color:#6B6E64;"><span class="d" style="background:#6B6E64;"></span>排名：${rankText}</span>
+      </div>
+      <div class="qa-meta" style="margin-top:0;">竞品识别</div>
+      <div style="margin:4px 0 8px;">${competitorsHtml}</div>
+      <div class="qa-meta" style="margin-top:0;">引用来源（${parsed.citation_count}）</div>
+      <div style="margin-top:4px;">${citationsHtml}</div>
+    </div>
+  `;
+}
+
 function renderQuick() {
   const cur = d();
   let html = `
@@ -355,7 +410,7 @@ function renderQuick() {
   `;
 
   if (state.quickResults) {
-    html += `<div class="hint">仅已连接平台会真实调用后端接口，其余平台会标注未执行原因。第一阶段只展示原始回答，不做品牌提及/排名/GEO评分分析。</div>`;
+    html += `<div class="hint">仅已连接平台会真实调用后端接口，其余平台会标注未执行原因。原始回答返回后会自动调用GEO结构化解析（品牌提及/推荐判定/排名/竞品/引用来源），解析结果基于确定性规则，仅供参考，不构成完整GEO评分。</div>`;
     for (const q of state.quickResults.questions) {
       html += `<div class="card"><div style="font-weight:600;font-size:13px;margin-bottom:6px;">问题：${escapeHtml(q)}</div>`;
       for (const entry of state.quickResults.resultsByQuestion[q]) {
@@ -373,6 +428,7 @@ function renderQuick() {
               <div><b>${entry.platform.name}</b> ${badge("connected")}</div>
               <div style="margin-top:6px;white-space:pre-wrap;">${escapeHtml(entry.answer)}</div>
               <div class="qa-meta">模型：${entry.model}　诊断时间：${entry.time}</div>
+              ${renderParsedGeo(entry.parsed, entry.parseError)}
             </div>`;
         }
       }
