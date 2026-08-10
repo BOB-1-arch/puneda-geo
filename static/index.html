@@ -194,18 +194,18 @@ async function askDeepSeek(question) {
   return res.json();
 }
 
-async function parseGeo(rawAnswer, model) {
-  const res = await fetch(BACKEND_URL + "/api/parse/geo", {
+async function diagnoseGeo(question, rawAnswer, model) {
+  const res = await fetch(BACKEND_URL + "/api/diagnose/geo", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ raw_answer: rawAnswer, model }),
+    body: JSON.stringify({ question, raw_answer: rawAnswer, model }),
   });
   if (!res.ok) {
-    let detail = "解析失败（状态码 " + res.status + "）";
+    let detail = "GEO诊断分析失败（状态码 " + res.status + "）";
     try { const err = await res.json(); if (err.detail) detail = err.detail; } catch (e) {}
     throw new Error(detail);
   }
-  return res.json();
+  return res.json(); // { parsed, diagnosis }
 }
 
 /* ---------------- 交互逻辑 ---------------- */
@@ -216,6 +216,16 @@ function setPage(p) { state.page = p; render(); }
 function toggleSelected(setObj, id) {
   setObj.has(id) ? setObj.delete(id) : setObj.add(id);
   render();
+}
+
+function findQuickEntry(qIndex, platformId) {
+  const q = state.quickResults && state.quickResults.questions[qIndex];
+  const list = q != null && state.quickResults.resultsByQuestion[q];
+  return list ? list.find(e => e.platform.id === platformId) : null;
+}
+function toggleRawAnswer(qIndex, platformId) {
+  const entry = findQuickEntry(qIndex, platformId);
+  if (entry) { entry.showRaw = !entry.showRaw; render(); }
 }
 
 async function startQuick() {
@@ -246,7 +256,9 @@ async function startQuick() {
         entry.time = new Date().toLocaleString("zh-CN", { hour12: false });
         render();
         try {
-          entry.parsed = await parseGeo(data.raw_answer, data.model);
+          const result = await diagnoseGeo(q, data.raw_answer, data.model);
+          entry.parsed = result.parsed;
+          entry.diagnosis = result.diagnosis;
         } catch (e) {
           entry.parseError = e.message;
         }
@@ -349,13 +361,27 @@ function renderDashboard() {
   return html;
 }
 
-function renderParsedGeo(parsed, parseError) {
-  if (parseError) {
-    return `<div class="qa-meta" style="color:#B23A2E;">GEO结构化解析失败 — ${escapeHtml(parseError)}</div>`;
-  }
-  if (!parsed) {
-    return `<div class="qa-meta">GEO结构化解析中…</div>`;
-  }
+const ANSWER_FIT_LABELS = { good: "匹配", partial: "部分匹配", poor: "不匹配", unknown: "无法判断" };
+const ANSWER_FIT_LEVELS = { good: "good", partial: "warn", poor: "bad", unknown: "neutral" };
+const QUALITY_LABELS = { high: "高", medium: "中", low: "低", unknown: "无法判断" };
+const QUALITY_LEVELS = { high: "good", medium: "warn", low: "bad", unknown: "neutral" };
+
+function levelBadge(text, level) {
+  const colors = {
+    good:    { bg: "#0E8C7F14", fg: "#0E8C7F" },
+    warn:    { bg: "#C7860714", fg: "#C78607" },
+    bad:     { bg: "#B23A2E10", fg: "#B23A2E" },
+    neutral: { bg: "#F5F6F1",   fg: "#6B6E64" },
+  };
+  const c = colors[level] || colors.neutral;
+  return `<span class="badge" style="background:${c.bg};color:${c.fg};"><span class="d" style="background:${c.fg};"></span>${text}</span>`;
+}
+
+function sectionHeader(text) {
+  return `<div style="font-weight:600;font-size:12.5px;color:#14213A;margin:14px 0 8px;padding-top:10px;border-top:1px dashed #EFF0E9;">【${text}】</div>`;
+}
+
+function renderBasicResult(parsed) {
   const mentionBadge = parsed.brand_mentioned
     ? `<span class="badge badge-connected"><span class="d"></span>品牌已提及（${parsed.mention_count}次）</span>`
     : `<span class="badge badge-not"><span class="d"></span>品牌未提及</span>`;
@@ -371,15 +397,91 @@ function renderParsedGeo(parsed, parseError) {
     : `<span style="color:#9A9C92;font-size:12px;">未识别到引用来源</span>`;
 
   return `
-    <div style="margin-top:10px;padding-top:10px;border-top:1px dashed #EFF0E9;">
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
-        ${mentionBadge}${recBadge}
-        <span class="badge" style="background:#F5F6F1;color:#6B6E64;"><span class="d" style="background:#6B6E64;"></span>排名：${rankText}</span>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
+      ${mentionBadge}${recBadge}
+      <span class="badge" style="background:#F5F6F1;color:#6B6E64;"><span class="d" style="background:#6B6E64;"></span>排名：${rankText}</span>
+    </div>
+    <div class="qa-meta" style="margin-top:0;">竞品识别</div>
+    <div style="margin:4px 0 8px;">${competitorsHtml}</div>
+    <div class="qa-meta" style="margin-top:0;">引用来源（${parsed.citation_count}）</div>
+    <div style="margin-top:4px;">${citationsHtml}</div>
+  `;
+}
+
+function renderGeoDiagnosisOverview(diag) {
+  const gapTags = diag.gaps.length
+    ? diag.gaps.map(g => `<span class="type-tag" style="${g.type === 'NO_CLEAR_GAP' ? '' : 'background:#B23A2E10;color:#B23A2E;'}">${escapeHtml(g.label)}</span>`).join("")
+    : `<span style="color:#9A9C92;font-size:12px;">无</span>`;
+
+  return `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px;">
+      <span class="badge" style="background:#F5F6F1;color:#14213A;"><span class="d" style="background:#14213A;"></span>Query意图：${escapeHtml(diag.query_intent_label)}</span>
+      ${levelBadge("回答匹配度：" + (ANSWER_FIT_LABELS[diag.answer_fit] || diag.answer_fit), ANSWER_FIT_LEVELS[diag.answer_fit] || "neutral")}
+      ${levelBadge("行业知识质量：" + (QUALITY_LABELS[diag.industry_knowledge_quality] || diag.industry_knowledge_quality), QUALITY_LEVELS[diag.industry_knowledge_quality] || "neutral")}
+    </div>
+    <div class="qa-meta" style="margin-top:0;">主要GEO Gap</div>
+    <div style="margin:4px 0 0;">${gapTags}</div>
+  `;
+}
+
+function renderActionItems(items) {
+  if (!items.length) {
+    return `<span style="color:#9A9C92;font-size:12px;">暂无改善建议</span>`;
+  }
+  const priorityColor = { P1: "#B23A2E", P2: "#C78607", P3: "#6B6E64" };
+  return items.map(a => {
+    const c = priorityColor[a.priority] || "#6B6E64";
+    return `
+      <div style="border:1px solid #E4E6DE;border-radius:8px;padding:10px 12px;margin-bottom:8px;">
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px;flex-wrap:wrap;">
+          <span class="badge" style="background:${c}10;color:${c};"><span class="d" style="background:${c};"></span>${escapeHtml(a.priority)}</span>
+          <span class="type-tag" style="margin:0;">${escapeHtml(a.action_type)}</span>
+        </div>
+        <div style="font-size:13px;margin-bottom:4px;">${escapeHtml(a.action)}</div>
+        <div class="qa-meta" style="margin-top:0;">原因：${escapeHtml(a.reason)}</div>
       </div>
-      <div class="qa-meta" style="margin-top:0;">竞品识别</div>
-      <div style="margin:4px 0 8px;">${competitorsHtml}</div>
-      <div class="qa-meta" style="margin-top:0;">引用来源（${parsed.citation_count}）</div>
-      <div style="margin-top:4px;">${citationsHtml}</div>
+    `;
+  }).join("");
+}
+
+function renderGapEvidence(gaps) {
+  return gaps.map(g => `
+    <div style="font-size:12.5px;padding:6px 0;border-bottom:1px solid #EFF0E9;">
+      <b>${escapeHtml(g.label)}</b>：${escapeHtml(g.evidence)}
+    </div>
+  `).join("");
+}
+
+function renderDiagnosisBlock(entry) {
+  if (entry.parseError) {
+    return `<div class="qa-meta" style="color:#B23A2E;">GEO诊断分析失败 — ${escapeHtml(entry.parseError)}</div>`;
+  }
+  if (!entry.parsed || !entry.diagnosis) {
+    return `<div class="qa-meta">GEO诊断分析中…</div>`;
+  }
+  const parsed = entry.parsed, diag = entry.diagnosis;
+  return `
+    ${sectionHeader("基础结果")}
+    ${renderBasicResult(parsed)}
+    ${sectionHeader("GEO诊断")}
+    ${renderGeoDiagnosisOverview(diag)}
+    ${sectionHeader("诊断结论")}
+    <div style="font-size:13px;line-height:1.7;">${escapeHtml(diag.diagnosis_summary)}</div>
+    ${sectionHeader("改善建议")}
+    ${renderActionItems(diag.action_items)}
+    ${sectionHeader("证据")}
+    ${renderGapEvidence(diag.gaps)}
+  `;
+}
+
+function renderRawAnswerToggle(qIndex, entry) {
+  const expanded = !!entry.showRaw;
+  return `
+    <div style="margin-top:14px;padding-top:10px;border-top:1px dashed #EFF0E9;">
+      <a href="#" onclick="toggleRawAnswer(${qIndex},'${entry.platform.id}');return false;" style="font-size:12.5px;color:#6B6E64;">
+        ${expanded ? "▲ 收起原始回答" : "▼ 查看原始回答"}
+      </a>
+      ${expanded ? `<div style="margin-top:8px;white-space:pre-wrap;font-size:13px;background:#F5F6F1;border-radius:8px;padding:10px 12px;">${escapeHtml(entry.answer)}</div>` : ""}
     </div>
   `;
 }
@@ -410,8 +512,8 @@ function renderQuick() {
   `;
 
   if (state.quickResults) {
-    html += `<div class="hint">仅已连接平台会真实调用后端接口，其余平台会标注未执行原因。原始回答返回后会自动调用GEO结构化解析（品牌提及/推荐判定/排名/竞品/引用来源），解析结果基于确定性规则，仅供参考，不构成完整GEO评分。</div>`;
-    for (const q of state.quickResults.questions) {
+    html += `<div class="hint">仅已连接平台会真实调用后端接口，其余平台会标注未执行原因。原始回答返回后会自动调用GEO诊断分析（结构化解析 + Query意图/回答匹配度/行业知识质量/Gap诊断），全部基于确定性规则，仅供参考，不构成完整GEO评分。</div>`;
+    state.quickResults.questions.forEach((q, qIndex) => {
       html += `<div class="card"><div style="font-weight:600;font-size:13px;margin-bottom:6px;">问题：${escapeHtml(q)}</div>`;
       for (const entry of state.quickResults.resultsByQuestion[q]) {
         if (entry.phase === "skipped") {
@@ -426,14 +528,14 @@ function renderQuick() {
           html += `
             <div class="qa-block">
               <div><b>${entry.platform.name}</b> ${badge("connected")}</div>
-              <div style="margin-top:6px;white-space:pre-wrap;">${escapeHtml(entry.answer)}</div>
               <div class="qa-meta">模型：${entry.model}　诊断时间：${entry.time}</div>
-              ${renderParsedGeo(entry.parsed, entry.parseError)}
+              ${renderDiagnosisBlock(entry)}
+              ${renderRawAnswerToggle(qIndex, entry)}
             </div>`;
         }
       }
       html += `</div>`;
-    }
+    });
   }
   return html;
 }

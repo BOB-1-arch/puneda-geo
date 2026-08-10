@@ -116,6 +116,14 @@ curl http://localhost:8000/api/platforms/deepseek/status
 ```
 `reasoning_content` 仅在 `thinking=true` 时有值，是模型给出最终答案前的思维链内容。
 
+### `POST /api/parse/geo`
+请求体：`{"raw_answer": "……原始回答……", "model": "deepseek-v4-flash"}`。
+基于 `brand_parser.py` 的确定性规则，解析出品牌提及/推荐判定/排名/竞品/引用来源等结构化字段，不调用任何AI去猜。
+
+### `POST /api/diagnose/geo`
+请求体：`{"question": "车载冰箱厂家推荐", "raw_answer": "……原始回答……", "model": "deepseek-v4-flash"}`。
+在 `/api/parse/geo` 的结构化解析基础上，由 `diagnosis_analyzer.py` 进一步给出 Query Intent 分类、回答匹配度、行业认知质量、GEO Gap（带证据）、诊断结论、改善建议（P1/P2/P3）。同样只用确定性规则，不调用AI去猜原因，推断类结论会带"可能/更可能/从当前回答看"等证据边界词。返回体为 `{"parsed": {...}, "diagnosis": {...}}`。
+
 ## 六、重要提示
 
 - **模型名称已更新**：`deepseek-chat` / `deepseek-reasoner` 已于 **2026-07-24 15:59 UTC 正式弃用**，调用会直接报错，不再自动路由。已按官方迁移指引改为显式使用 `deepseek-v4-flash`（默认）/ `deepseek-v4-pro`。Base URL（`https://api.deepseek.com`）和接口路径（`/chat/completions`）均未变化。
