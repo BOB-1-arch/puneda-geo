@@ -45,9 +45,12 @@ BRAND_LIST_PATTERN = re.compile(
 )
 
 # 车载冰箱行业/GEO场景下常见的通用词，不是具体品牌名，抽取到要过滤掉
+# 含关系一律过滤（而不仅是完全相等），避免"车载冰箱推荐以下""选择车载冰箱"
+# 这类夹带通用词的整句被 BRAND_SUFFIX_PATTERN 误当成品牌名抽出来。
 GENERIC_TERMS = {
     "车载冰箱", "冰箱", "压缩机", "品牌", "厂家", "产品", "市场", "行业",
     "消费者", "用户", "价格", "质量", "性能", "选购", "推荐",
+    "老牌", "知名", "正规", "靠谱", "以下", "如下", "这些", "上述",
 }
 
 
@@ -100,7 +103,13 @@ def parse_geo_answer(raw_answer: str, model: str) -> dict:
         name = _clean_candidate(name)
         if not name or len(name) < 2 or len(name) > 12:
             return
-        if name in GENERIC_TERMS:
+        # 含"的"几乎必然说明抓到的是描述性短句/从句片段（如"售后完善的"），
+        # 真实品牌名不会带这个虚词，直接过滤。
+        if "的" in name:
+            return
+        # 只要候选词里夹带任一通用词就过滤（而非要求完全相等），
+        # 拦掉"车载冰箱推荐以下""选择车载冰箱"这类整句被误抽的情况。
+        if any(term in name for term in GENERIC_TERMS):
             return
         if any(alias.lower() == name.lower() for alias in BRAND_ALIASES):
             return
@@ -112,7 +121,10 @@ def parse_geo_answer(raw_answer: str, model: str) -> dict:
 
     for item in list_items:
         cleaned = re.sub(r'^(推荐|品牌|厂家)[:：]?', '', item).strip()
-        m = re.match(r'([A-Za-z\u4e00-\u9fa5]{2,12})', cleaned)
+        # 上限对齐 BRAND_SUFFIX_PATTERN / BRAND_LIST_PATTERN 的 {2,8}：
+        # 列表项若不是“品牌名 —— 描述”而是整句描述性文字（无早期标点断句），
+        # 12字符上限会把半句话截出来误当品牌名，8字符更接近真实品牌名长度。
+        m = re.match(r'([A-Za-z\u4e00-\u9fa5]{2,8})', cleaned)
         if m:
             add_candidate(m.group(1))
 
