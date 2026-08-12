@@ -21,7 +21,11 @@ def _sample_item(question="q1", status="success", **overrides):
         "raw_answer": "英得尔、冰虎不错。", "model": "deepseek-v4-flash",
         "tested_at": "2026-08-12 00:00:00",
         "brand_mentioned": False, "mention_count": 0, "recommended": False, "rank": None,
-        "competitors": ["英得尔", "冰虎"], "citations": [],
+        "competitors": [
+            {"name": "英得尔", "aliases": ["Indel B"], "confidence": "high", "evidence": "英得尔"},
+            {"name": "冰虎", "aliases": ["Alpicool"], "confidence": "high", "evidence": "冰虎"},
+        ],
+        "citations": [],
         "answer_fit": "partial", "industry_knowledge_quality": "low",
         "gaps": [{"type": "BRAND_ABSENCE", "label": "品牌未进入AI答案", "evidence": "..."}],
         "diagnosis_summary": "...", "observations": ["..."], "inferences": ["..."],
@@ -64,7 +68,8 @@ def test_get_run_items_deserializes_json_fields():
     items = storage.get_run_items(run_id, db_path=db)
     assert len(items) == 1
     it = items[0]
-    assert it["competitors"] == ["英得尔", "冰虎"]
+    assert [c["name"] for c in it["competitors"]] == ["英得尔", "冰虎"]
+    assert it["competitors"][0]["confidence"] == "high"
     assert isinstance(it["gaps"], list) and it["gaps"][0]["type"] == "BRAND_ABSENCE"
     assert it["brand_mentioned"] is False
     assert isinstance(it["actions"], list) and it["actions"][0]["priority"] == "P1"

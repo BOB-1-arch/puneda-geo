@@ -25,6 +25,11 @@ def _item(question, status="success", commercial_value="medium", query_intent="c
     }
 
 
+def _comp(name, aliases=None, confidence="high"):
+    """构造 brand_parser 现在产出的结构化竞品数据 {name, aliases, confidence, evidence}。"""
+    return {"name": name, "aliases": aliases or [], "confidence": confidence, "evidence": name}
+
+
 # 1. 20题完整成功
 def test_20_questions_all_success():
     items = [_item(f"q{i}", brand_mentioned=(i % 2 == 0)) for i in range(20)]
@@ -93,9 +98,9 @@ def test_citation_mixed():
 # 7. competitors重复聚合
 def test_competitors_aggregated_across_items():
     items = [
-        _item("q1", competitors=["英得尔", "冰虎"]),
-        _item("q2", competitors=["英得尔"]),
-        _item("q3", competitors=["英得尔", "科敏"]),
+        _item("q1", competitors=[_comp("英得尔"), _comp("冰虎")]),
+        _item("q2", competitors=[_comp("英得尔")]),
+        _item("q3", competitors=[_comp("英得尔"), _comp("科敏")]),
     ]
     top = aggregate_competitors(items)
     by_name = {c["name"]: c for c in top}
@@ -107,12 +112,38 @@ def test_competitors_aggregated_across_items():
 
 
 def test_competitors_early_mention_only_counts_first_three():
-    items = [_item("q1", competitors=["A", "B", "C", "D", "E"])]
+    items = [_item("q1", competitors=[_comp("A"), _comp("B"), _comp("C"), _comp("D"), _comp("E")])]
     top = aggregate_competitors(items)
     by_name = {c["name"]: c for c in top}
     assert by_name["A"]["early_mention_count"] == 1
     assert by_name["D"]["early_mention_count"] == 0  # 第4位，不算前3
     assert by_name["D"]["appearance_count"] == 1
+
+
+def test_low_confidence_competitors_excluded_from_aggregation():
+    """只统计 confidence=high 的竞品，medium/low 不进入TOP10聚合统计。"""
+    items = [
+        _item("q1", competitors=[_comp("英得尔", confidence="high"),
+                                   _comp("某某疑似品牌", confidence="medium")]),
+    ]
+    top = aggregate_competitors(items)
+    names = [c["name"] for c in top]
+    assert names == ["英得尔"]
+    assert "某某疑似品牌" not in names
+
+
+def test_competitor_aliases_merged_not_counted_as_two_brands():
+    """"冰虎"和"Alpicool"是同一个品牌的中英文名，跨题出现时必须归并成一条，
+    不能在TOP10里算成两个不同的竞品。"""
+    items = [
+        _item("q1", competitors=[_comp("冰虎", aliases=["Alpicool"])]),
+        _item("q2", competitors=[_comp("冰虎", aliases=["Alpicool"])]),
+    ]
+    top = aggregate_competitors(items)
+    assert len(top) == 1
+    assert top[0]["name"] == "冰虎"
+    assert top[0]["appearance_count"] == 2
+    assert "Alpicool" in top[0]["aliases"]
 
 
 # 8. Gap重复聚合

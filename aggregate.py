@@ -6,6 +6,10 @@ GEO 深度诊断 - 聚合统计
 
 诚实原则（和 brand_parser / diagnosis_analyzer 一致）：
 - 只统计现有数据结构里真实存在的字段，不编造。
+- brand_parser 现在的 competitors 是 Precision First 结构化数据
+  {name, aliases, confidence, evidence}，聚合时只统计 confidence=high 的
+  条目，并按"中文名/英文别名"做归一化合并（比如"冰虎"和"Alpicool"是同一个
+  品牌，不能在TOP10里算成两条）。
 - 竞品TOP10只统计"出现次数"和"按识别顺序进入前3的次数"两个可靠指标；
   brand_parser 目前不追踪"某个竞品是否被AI判定为推荐"，这个信号不存在，
   所以这里不做"竞品推荐次数"这种编造不出来的统计（详见 aggregate_competitors
@@ -57,8 +61,15 @@ def compute_run_stats(items):
     }
 
 
+def _competitor_key(competitor: dict) -> str:
+    return (competitor.get("name") or "").strip().lower()
+
+
 def aggregate_competitors(items, top_n=10):
-    """竞争品牌TOP10：出现次数 + 按识别顺序进入该题前3位的次数。
+    """竞争品牌TOP10：只统计 confidence=high 的竞品，出现次数 + 按识别顺序
+    进入该题前3位的次数。按标准化name做归一化合并，同一品牌的中英文alias
+    一并携带，前端展示成"中文名 / 英文别名"，不会把同一品牌的中英文名
+    拆成两条。
 
     "前3位"是指该竞品在该题 competitors 列表里的顺序位置（brand_parser
     按首次出现顺序排列），不是AI在答案里给出的排名数字——brand_parser
@@ -67,24 +78,37 @@ def aggregate_competitors(items, top_n=10):
     """
     appearance = Counter()
     early_mention = Counter()  # 在该题 competitors 列表前3位出现
+    display_name = {}
+    aliases_by_key = {}
 
     for it in items:
         if it.get("status") != "success":
             continue
-        competitors = it.get("competitors") or []
-        for name in competitors:
-            appearance[name] += 1
-        for name in competitors[:3]:
-            early_mention[name] += 1
+        competitors = [
+            c for c in (it.get("competitors") or []) if c.get("confidence") == "high"
+        ]
+        for idx, c in enumerate(competitors):
+            key = _competitor_key(c)
+            if not key:
+                continue
+            appearance[key] += 1
+            if idx < 3:
+                early_mention[key] += 1
+            display_name.setdefault(key, c.get("name", key))
+            existing_aliases = aliases_by_key.setdefault(key, [])
+            for a in c.get("aliases") or []:
+                if a not in existing_aliases:
+                    existing_aliases.append(a)
 
     ranked = sorted(appearance.items(), key=lambda kv: (-kv[1], kv[0]))[:top_n]
     return [
         {
-            "name": name,
+            "name": display_name[key],
+            "aliases": aliases_by_key.get(key, []),
             "appearance_count": count,
-            "early_mention_count": early_mention.get(name, 0),
+            "early_mention_count": early_mention.get(key, 0),
         }
-        for name, count in ranked
+        for key, count in ranked
     ]
 
 
