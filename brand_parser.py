@@ -52,6 +52,16 @@ LIST_MARKER_PATTERN = re.compile(
     r'(?:^|\n)\s*(?:[0-9]{1,2}[.、)．]|[①②③④⑤⑥⑦⑧⑨⑩]|[-•*])\s*([^\n]+)'
 )
 
+# 判断一个列表项"看起来是不是品牌开头"：要求候选词（2-6字，比通用的{2,8}更严格，
+# 真实品牌名基本不超过6字）紧跟着"（英文名）/——/-/："这类"品牌名后接说明"的
+# 分隔符。很多真实DeepSeek的列表其实是"购买建议/注意事项"而不是"品牌排名"，
+# 例如"1. 只是放几瓶水，不需要买太大容量的" "2. 挑选时注意压缩机品牌"——这类
+# 列表项完全没有品牌名开头，如果只是无脑截取每条前2-8个字，会把整句话的开头
+# 当成"品牌名"污染竞品统计。没有这个分隔符信号时宁可不提取，也不编造。
+BRAND_LED_LIST_ITEM_PATTERN = re.compile(
+    r'^([A-Za-z一-龥]{2,6})(?=\s*(?:[\(（]|[—－-]|[:：]))'
+)
+
 ORDINAL_WORDS = ["第一", "第二", "第三", "第四", "第五", "第六", "第七", "第八"]
 
 URL_PATTERN = re.compile(r'https?://[^\s\)\]\>，。；、"\'》]+')
@@ -221,10 +231,7 @@ def parse_geo_answer(raw_answer: str, model: str) -> dict:
 
     for item in list_items:
         cleaned = re.sub(r'^(推荐|品牌|厂家)[:：]?', '', item).strip()
-        # 上限对齐 BRAND_SUFFIX_PATTERN / BRAND_LIST_PATTERN 的 {2,8}：
-        # 列表项若不是"品牌名 —— 描述"而是整句描述性文字（无早期标点断句），
-        # 12字符上限会把半句话截出来误当品牌名，8字符更接近真实品牌名长度。
-        m = re.match(r'([A-Za-z一-龥]{2,8})', cleaned)
+        m = BRAND_LED_LIST_ITEM_PATTERN.match(cleaned)
         if m:
             add_candidate(m.group(1))
 
