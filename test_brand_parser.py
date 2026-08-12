@@ -161,6 +161,49 @@ def test_colon_enumeration_without_verb_recognized():
     assert result["competitors"] == ["英得尔", "冰虎", "科敏"]
 
 
+def test_advice_style_list_items_not_extracted_as_competitors():
+    """回归测试：合并上一轮修复后，用户反馈又看到了新一批误判——"只是放几瓶水"
+    "家庭""挑选""这两个""全球""它是""除了看"这些通用词/句子片段。根因是不同
+    的bug：很多真实DeepSeek列表其实是"购买建议/注意事项"而非"品牌排名"，例如
+    "1. 只是放几瓶水，不需要买太大容量的" "2. 挑选时注意压缩机品牌"，这类列表项
+    完全不是品牌名开头，但原来的逻辑无脑截取每条列表项前2-8个字当候选品牌名。
+
+    修复后要求候选词必须紧跟"（英文名）/——/-/："这类"品牌名后接说明"的分隔符
+    信号才提取，没有这个信号就不提取，宁可漏检也不能把整句话开头当成品牌名。
+    """
+    text = (
+        "车载冰箱选购建议：\n"
+        "1. 只是放几瓶水，不需要买太大容量的\n"
+        "2. 家庭日常使用建议选择20L左右\n"
+        "3. 长期露营或多人出行建议选择更大容量\n"
+        "4. 挑选时注意压缩机品牌和噪音水平\n"
+        "5. 这两个参数最重要：制冷速度和耗电量\n"
+        "6. 全球主流品牌都有对应产品线\n"
+        "7. 近几年推出了很多半导体制冷新品\n"
+        "8. 它是判断产品质量的重要指标\n"
+        "9. 除了看容量还要看外观设计"
+    )
+    result = parse_geo_answer(text, "deepseek-v4-flash")
+    assert result["competitors"] == []
+
+
+def test_brand_led_list_items_still_extracted_after_stricter_pattern():
+    """收紧列表项提取规则后，真正"品牌名开头+分隔符+说明"的列表项还是要能正常
+    提取，不能矫枉过正把所有列表都清空。覆盖"（英文名）——" "——" "：" 三种
+    常见分隔符写法。
+    """
+    text = (
+        "车载冰箱推荐以下品牌：\n"
+        "1. 普能达（PUNEDA）— 性价比高\n"
+        "2. 阿路卡（ALPICOOL）— 老牌厂家\n"
+        "3. 英得尔——国内知名品牌\n"
+        "4. 大有：口碑不错"
+    )
+    result = parse_geo_answer(text, "deepseek-v4-flash")
+    assert result["competitors"] == ["阿路卡", "英得尔", "大有"]
+    assert result["rank"] == 1
+
+
 ALL_TESTS = [v for k, v in list(globals().items()) if k.startswith("test_")]
 
 
