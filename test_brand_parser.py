@@ -121,6 +121,46 @@ def test_own_brand_followed_by_descriptive_suffix_not_extracted_as_competitor():
     assert "普能达是一家" not in result["competitors"]
 
 
+def test_real_world_generic_phrases_not_extracted_as_competitors():
+    """回归测试：生产环境用真实DeepSeek Key跑深度诊断时发现的严重误判——一段
+    正常的长回答被BRAND_SUFFIX_PATTERN抽出了"这类""关于""选择""主流""国内"
+    "有些""源自意大利"等一整批通用词/国家名当成"竞品品牌"，几乎污染了整个
+    竞品TOP10统计。根因是该正则原本把句首(^)/句号(。)/空白(\\s)都当作合法
+    边界，几乎每个新分句开头都会触发一次误抽取。
+    """
+    text = (
+        "车载冰箱市场上有很多选择，国内品牌和国际品牌都有不错的产品。\n"
+        "关于这类品牌，主流品牌包括阿路卡、大有等。国内品牌普遍性价比更高，\n"
+        "而有些品牌是全球知名品牌，比如源自意大利的一些高端品牌，也有厂家专注于中国市场。"
+    )
+    result = parse_geo_answer(text, "deepseek-v4-flash")
+    garbage_terms = {"这类", "关于", "选择", "主流", "国内", "有些", "全球",
+                      "源自意大利", "中国", "意大利", "也有"}
+    assert not (set(result["competitors"]) & garbage_terms), (
+        f"混入了通用词/国家名: {set(result['competitors']) & garbage_terms}"
+    )
+    assert result["competitors"] == ["阿路卡", "大有"]
+
+
+def test_enumeration_tail_quantifier_stripped_from_candidate():
+    """"车载梦想等几个品牌"这类枚举收尾里的"等几个/等几家/等多个"要被清洗掉，
+    不能把量词尾巴当成品牌名的一部分。
+    """
+    result = parse_geo_answer("市面上比较知名的有阿路卡、大有、车载梦想等几个品牌。", "deepseek-v4-flash")
+    assert "车载梦想等几个" not in result["competitors"]
+    assert "车载梦想" in result["competitors"]
+
+
+def test_colon_enumeration_without_verb_recognized():
+    """"以下几个品牌：A、B、C"这种冒号直接列举（没有"有/包括"等动词）也要能
+    识别成并列竞品列表，这是真实DeepSeek回答里很常见的写法。
+    """
+    result = parse_geo_answer(
+        "车载冰箱推荐以下几个品牌：英得尔、冰虎、科敏，性价比都不错。", "deepseek-v4-flash"
+    )
+    assert result["competitors"] == ["英得尔", "冰虎", "科敏"]
+
+
 ALL_TESTS = [v for k, v in list(globals().items()) if k.startswith("test_")]
 
 
