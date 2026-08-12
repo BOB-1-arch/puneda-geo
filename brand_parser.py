@@ -170,8 +170,26 @@ FORBIDDEN_WORDS = {
     # 商业描述词
     "厂家", "制造商", "供应商", "OEM", "ODM", "经销商", "品牌", "产品",
     "市场", "售后", "优势", "行业", "消费者", "用户", "价格", "质量",
-    "性能", "选购",
+    "性能", "选购", "口碑", "容量", "外观", "噪音", "功耗", "做工",
+    "续航", "耐用", "保修", "尺寸", "重量", "接口", "散热", "静音",
 }
+
+# 枚举型来源（BRAND_LIST_PATTERN / BRAND_HINT_PATTERN）专用的二次校验字符集。
+# 这两种来源只靠"品牌/厂家"关键词 + 冒号/并列符号触发，句式本身并不能保证
+# 被顿号/和/及连接的每一段就是专有名词——真实DeepSeek回答里
+# "品牌：容量、噪音和功耗需要综合评估"这种句子表面符合"品牌：A、B和C"结构，
+# 实际是在描述"选购要看的维度"，不是在列举品牌名。这组字符是专有名词里
+# 几乎不会出现的虚词/动词/后缀字，命中即拒绝；已与 KNOWN_BRANDS 全部条目
+# 逐字比对过，不会误伤已收录品牌。只对来源3/4生效，不影响词典命中和
+# 中英文括号结构这两个独立证据更强的来源。
+ENUMERATION_GUARD_CHARS = set(
+    "看要是在为都也就着了地与但而或需综合考虑值较更最比该其此评估构"
+    "建设计参数维度因素方面重要注意值得需要"
+)
+
+
+def _passes_enumeration_guard(piece: str) -> bool:
+    return not any(ch in ENUMERATION_GUARD_CHARS for ch in piece)
 
 # "中文品牌名（英文名）"括号结构，允许两侧带 Markdown 加粗符号 **。
 # 例如 "**英得尔（Indel B）**" "冰虎（Alpicool）" "美固(MOBICOOL)"。
@@ -184,15 +202,20 @@ CN_EN_BRAND_PATTERN = re.compile(
 )
 
 # "品牌有A、B、C" "厂家推荐：A、B和C" "推荐以下品牌：A、B、C" 这种并列列表。
-# 触发词支持"有/包括/如/推荐"这几个动词，也支持"品牌/厂家"后面直接跟冒号。
+# 触发词要求"有/包括/如/推荐"这几个明确的枚举动词之一——不再接受"品牌："
+# 裸冒号单独触发多项列表。裸冒号信号太弱：真实DeepSeek回答里"品牌：容量、
+# 噪音和功耗"这种描述句也会表面符合"品牌：A、B和C"的形状，但列的根本不是
+# 品牌名。裸冒号场景改由 BRAND_HINT_PATTERN 处理（只取单个候选词，风险
+# 小很多，且有 ENUMERATION_GUARD_CHARS 兜底）。
 # 分隔符支持顿号"、"及中文连接词"和""及"。
 BRAND_LIST_PATTERN = re.compile(
-    r'(?:品牌|厂家)(?:(?:有|包括|如|推荐)[:：]?|[:：])\s*'
+    r'(?:品牌|厂家)(?:有|包括|如|推荐)[:：]?\s*'
     r'((?:[A-Za-z一-龥]{2,8}(?:、|和|及))+[A-Za-z一-龥]{2,8}(?=[，,。;；:：\s、！？]|$))'
 )
 
 # "品牌：冰虎" 这种单个品牌的明确提示句式（没有并列结构，BRAND_LIST_PATTERN
-# 覆盖不到）。
+# 覆盖不到）。裸冒号信号本身较弱，只取一个候选词，且必须再通过
+# ENUMERATION_GUARD_CHARS 二次校验。
 BRAND_HINT_PATTERN = re.compile(
     r'品牌[:：]\s*([A-Za-z一-龥]{2,8})(?=[，,。;；\s]|$)'
 )
@@ -298,14 +321,16 @@ def extract_competitors(text: str) -> list:
     for m in CN_EN_BRAND_PATTERN.finditer(text):
         register(m.group(1), [m.group(2).strip()], m.group(0))
 
-    # 来源3：明确的"品牌有/包括/推荐/：A、B、C"并列列表。
+    # 来源3：明确的"品牌有/包括/如/推荐A、B、C"并列列表（要求显式枚举动词）。
     for m in BRAND_LIST_PATTERN.finditer(text):
         for piece in re.split(r'、|和|及', m.group(1)):
-            register(piece, [], piece)
+            if _passes_enumeration_guard(piece):
+                register(piece, [], piece)
 
-    # 来源4："品牌：X"单个品牌的明确提示句式。
+    # 来源4："品牌：X"单个品牌的明确提示句式，裸冒号信号弱，额外过一遍guard。
     for m in BRAND_HINT_PATTERN.finditer(text):
-        register(m.group(1), [], m.group(0))
+        if _passes_enumeration_guard(m.group(1)):
+            register(m.group(1), [], m.group(0))
 
     return competitors
 

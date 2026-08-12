@@ -240,6 +240,61 @@ def test_no_structure_no_dictionary_hit_stays_empty():
     assert result["competitors"] == []
 
 
+# ---------------------------------------------------------------------------
+# 回归测试：品牌裸冒号 + 描述性分句被误当成"品牌列表"
+# ---------------------------------------------------------------------------
+
+def test_real_failure_case_again_with_full_forbidden_word_set():
+    """用户报告的真实失败案例，逐字符复核：不能出现"挑选""不能只看""国产"
+    "这个""国内高端"任意一个作为竞品名。"""
+    text = "选择车载冰箱不能只看品牌，国产高端产品也不错，这个价位性价比很高，值得挑选。"
+    result = parse_geo_answer(text, "deepseek-v4-flash")
+    assert result["competitors"] == []
+    names = _names(result)
+    for forbidden in ["挑选", "不能只看", "国产", "这个", "国内高端"]:
+        assert forbidden not in names, f"混入了通用词: {forbidden}"
+
+
+def test_bare_colon_hint_with_descriptive_clause_not_extracted():
+    """"品牌：主要看压缩机和口碑"——裸冒号后面跟的是"选购要看什么"的描述句，
+    不是品牌枚举。裸冒号触发的BRAND_HINT_PATTERN只应捕获单个候选词，且必须
+    通过ENUMERATION_GUARD_CHARS二次校验，"口碑"这类商业描述词也在强制排除
+    词库里，不能被识别成竞品。
+    """
+    text = "买车载冰箱的时候，品牌：主要看压缩机和口碑，不能只看价格，国产高端产品也不错。"
+    result = parse_geo_answer(text, "deepseek-v4-flash")
+    assert result["competitors"] == []
+
+
+def test_bare_colon_multi_clause_list_not_extracted_as_brands():
+    """"品牌：容量、噪音和功耗需要综合评估"表面符合"品牌：A、B和C"的形状，
+    但裸冒号信号太弱，不能触发多项列表解析（BRAND_LIST_PATTERN现在要求
+    "有/包括/如/推荐"这类显式枚举动词），"容量""噪音""功耗"这些产品参数词
+    也不能被当成竞品品牌。
+    """
+    text = "这类车载冰箱品牌：容量、噪音和功耗需要综合评估，不能只看价格。"
+    result = parse_geo_answer(text, "deepseek-v4-flash")
+    assert result["competitors"] == []
+
+
+def test_bare_colon_verb_phrase_not_extracted_as_brand():
+    """"品牌：外观和做工都不错，值得入手"——"和"连接的是两个描述性短语，
+    不是品牌名并列。ENUMERATION_GUARD_CHARS命中"都"字后应整体拒绝。
+    """
+    text = "选择时品牌：外观和做工都不错，值得入手。"
+    result = parse_geo_answer(text, "deepseek-v4-flash")
+    assert result["competitors"] == []
+
+
+def test_explicit_verb_enumeration_of_known_brands_still_works():
+    """裸冒号分支收紧后，"品牌包括A、B"这种带显式枚举动词的写法必须继续生效，
+    不能连真实的、已知品牌的枚举列表也一起漏掉。"""
+    result = parse_geo_answer(
+        "关于这类品牌，主流品牌包括阿路卡、大有等。", "deepseek-v4-flash"
+    )
+    assert _names(result) == ["阿路卡", "大有"]
+
+
 ALL_TESTS = [v for k, v in list(globals().items()) if k.startswith("test_")]
 
 
