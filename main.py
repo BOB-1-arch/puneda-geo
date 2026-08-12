@@ -17,6 +17,9 @@ from pydantic import BaseModel
 
 from brand_parser import parse_geo_answer
 from diagnosis_analyzer import diagnose as run_geo_diagnosis
+from question_bank import select_questions
+import storage
+from aggregate import build_full_report, compute_run_stats
 
 try:
     from dotenv import load_dotenv
@@ -33,6 +36,8 @@ DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 # 默认模型可通过环境变量覆盖，方便后续整体切换到 v4-pro，无需改代码。
 DEEPSEEK_DEFAULT_MODEL = os.environ.get("DEEPSEEK_DEFAULT_MODEL", "deepseek-v4-flash")
 VALID_DEEPSEEK_MODELS = {"deepseek-v4-flash", "deepseek-v4-pro"}
+
+storage.init_db()
 
 app = FastAPI(title="GEO 智能体后端", version="0.1.0")
 
@@ -165,6 +170,105 @@ def diagnose_geo(req: DiagnoseRequest):
     parsed = parse_geo_answer(req.raw_answer, req.model)
     diagnosis = run_geo_diagnosis(req.question, req.raw_answer, parsed)
     return {"parsed": parsed, "diagnosis": diagnosis}
+
+
+# ---------------------------------------------------------------------------
+# 深度诊断（20题真实批量品牌体检）
+#
+# 批量本身不直接调用DeepSeek：前端逐题复用已有的 /api/ask/deepseek +
+# /api/diagnose/geo（和快速诊断完全同一条真实链路），后端这里只负责
+# 出题（question_bank）+ 落库（storage）+ 聚合统计（aggregate）。
+# 单题失败不影响其它题，由前端捕获错误后调用 /item 接口记录
+# status=failed + error_message，run 整体照常推进到 complete。
+# ---------------------------------------------------------------------------
+
+class DeepStartRequest(BaseModel):
+    market: str = "cn"
+    platform: str = "DeepSeek"
+    intents: list[str] | None = None
+    count: int = 20
+
+
+@app.post("/api/diagnose/deep/start")
+def start_deep_diagnosis(req: DeepStartRequest):
+    if req.platform != "DeepSeek":
+        raise HTTPException(status_code=400, detail="本轮深度诊断仅支持 DeepSeek 平台")
+    questions = select_questions(req.intents, req.count)
+    run_id = storage.create_run(req.market, req.platform, "quick_20", len(questions))
+    return {"run_id": run_id, "questions": questions}
+
+
+class DeepItemIn(BaseModel):
+    question: str
+    query_intent: str | None = None
+    commercial_value: str | None = None
+    platform: str = "DeepSeek"
+    status: str  # "success" | "failed"
+    raw_answer: str | None = None
+    model: str | None = None
+    tested_at: str | None = None
+    error_message: str | None = None
+    brand_mentioned: bool | None = None
+    mention_count: int | None = None
+    recommended: bool | None = None
+    rank: int | None = None
+    competitors: list[str] | None = None
+    citations: list[str] | None = None
+    answer_fit: str | None = None
+    industry_knowledge_quality: str | None = None
+    gaps: list[dict] | None = None
+    diagnosis_summary: str | None = None
+    observations: list[str] | None = None
+    inferences: list[str] | None = None
+    actions: list[dict] | None = None
+
+
+@app.post("/api/diagnose/deep/{run_id}/item")
+def save_deep_diagnosis_item(run_id: int, item: DeepItemIn):
+    run = storage.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="诊断任务不存在")
+    storage.add_item(run_id, item.model_dump())
+    return {"ok": True}
+
+
+@app.post("/api/diagnose/deep/{run_id}/complete")
+def complete_deep_diagnosis(run_id: int):
+    run = storage.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="诊断任务不存在")
+    storage.complete_run(run_id)
+    items = storage.get_run_items(run_id)
+    report = build_full_report(items)
+    return {"run": storage.get_run(run_id), "report": report, "items": items}
+
+
+@app.get("/api/diagnose/deep/runs")
+def list_deep_diagnosis_runs(market: str | None = None, platform: str | None = None, limit: int = 50):
+    runs = storage.list_runs(market=market, platform=platform, limit=limit)
+    result = []
+    for run in runs:
+        items = storage.get_run_items(run["id"])
+        result.append({**run, "stats": compute_run_stats(items)})
+    return {"runs": result}
+
+
+@app.get("/api/diagnose/deep/latest")
+def get_latest_deep_diagnosis(market: str | None = None, platform: str | None = None):
+    run = storage.get_latest_successful_run(market=market, platform=platform)
+    if not run:
+        return {"run": None, "report": None, "items": []}
+    items = storage.get_run_items(run["id"])
+    return {"run": run, "report": build_full_report(items), "items": items}
+
+
+@app.get("/api/diagnose/deep/runs/{run_id}")
+def get_deep_diagnosis_run(run_id: int):
+    run = storage.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="诊断任务不存在")
+    items = storage.get_run_items(run_id)
+    return {"run": run, "report": build_full_report(items), "items": items}
 
 
 # 把 static/ 目录里的前端网页一并托管出去，浏览器访问 http://127.0.0.1:8000/ 即可打开。

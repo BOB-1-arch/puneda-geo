@@ -190,7 +190,11 @@ def parse_geo_answer(raw_answer: str, model: str) -> dict:
         # 拦掉"车载冰箱推荐以下""选择车载冰箱"这类整句被误抽的情况。
         if any(term in name for term in GENERIC_TERMS):
             return
-        if any(alias.lower() == name.lower() for alias in BRAND_ALIASES):
+        # 含关系而非完全相等：拦掉"普能达是一家车载冰箱生产厂家"这种本方品牌名
+        # 紧跟描述文字、被 BRAND_SUFFIX_PATTERN 一起抓进候选词的情况——真实竞品名
+        # 不可能包含本方品牌的字符串。这是深度诊断批量测试中新发现的问题，
+        # 快速诊断走的是同一套 brand_parser，此前没被现有用例覆盖到。
+        if any(alias.lower() in name.lower() for alias in BRAND_ALIASES):
             return
         key = name.lower()
         if key in seen:
