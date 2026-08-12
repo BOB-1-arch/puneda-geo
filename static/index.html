@@ -590,8 +590,8 @@ function renderDashboard() {
       latest.report.gaps_top.slice(0, 5).map(g => `<div class="status-row"><span>${escapeHtml(g.label)}</span><span style="color:#6B6E64;">${g.count}</span></div>`).join("")
       || `<div class="qa-meta">暂无</div>`
     }</div>`;
-    html += `<div class="card"><h3>竞争品牌 TOP10</h3>${
-      latest.report.competitors_top.map(c => `<div class="status-row"><span>${escapeHtml(c.name)}</span><span style="color:#6B6E64;">${c.appearance_count}</span></div>`).join("")
+    html += `<div class="card"><h3>竞争品牌 TOP10（仅高置信度）</h3>${
+      latest.report.competitors_top.map(c => `<div class="status-row"><span>${escapeHtml(competitorDisplayName(c))}</span><span style="color:#6B6E64;">${c.appearance_count}</span></div>`).join("")
       || `<div class="qa-meta">暂无</div>`
     }</div>`;
     const p1 = latest.report.action_items.filter(a => a.priority === "P1");
@@ -639,8 +639,8 @@ function renderBasicResult(parsed) {
     : `<span class="badge badge-not"><span class="d"></span>未判定为推荐</span>`;
   const rankText = parsed.rank != null ? `第 ${parsed.rank} 位` : "无法判断";
   const competitorsHtml = parsed.competitors.length
-    ? parsed.competitors.map(c => `<span class="type-tag">${escapeHtml(c)}</span>`).join("")
-    : `<span style="color:#9A9C92;font-size:12px;">未识别到竞品</span>`;
+    ? parsed.competitors.map(c => `<span class="type-tag">${escapeHtml(competitorDisplayName(c))}</span>`).join("")
+    : `<span style="color:#9A9C92;font-size:12px;">未识别到高置信度竞品</span>`;
   const citationsHtml = parsed.citations.length
     ? parsed.citations.map(u => `<div style="font-size:12px;word-break:break-all;padding:2px 0;"><a href="${escapeHtml(u)}" target="_blank" rel="noopener noreferrer">${escapeHtml(u)}</a></div>`).join("")
     : `<span style="color:#9A9C92;font-size:12px;">未识别到引用来源</span>`;
@@ -853,12 +853,12 @@ function renderGapsTopSection(gapsTop) {
 }
 
 function renderCompetitorsTopSection(competitorsTop) {
-  let html = `<div class="card"><h3>竞争品牌 TOP10</h3>`;
+  let html = `<div class="card"><h3>竞争品牌 TOP10（仅高置信度）</h3>`;
   if (!competitorsTop.length) {
-    html += `<div class="qa-meta">未识别到竞品品牌。</div>`;
+    html += `<div class="qa-meta">未识别到高置信度竞品品牌。</div>`;
   } else {
     html += competitorsTop.map(c => `
-      <div class="status-row"><span>${escapeHtml(c.name)}</span><span style="color:#6B6E64;font-size:12px;">出现 ${c.appearance_count} 次　识别顺序前3位 ${c.early_mention_count} 次</span></div>
+      <div class="status-row"><span>${escapeHtml(competitorDisplayName(c))}</span><span style="color:#6B6E64;font-size:12px;">出现 ${c.appearance_count} 次　识别顺序前3位 ${c.early_mention_count} 次</span></div>
     `).join("");
   }
   html += `</div>`;
@@ -897,7 +897,7 @@ function renderDeepItemCard(it, idx) {
         ${mentionBadge}${recBadge}
         <span class="badge" style="background:#F5F6F1;color:#6B6E64;">排名：${rankText}</span>
       </div>
-      <div class="qa-meta" style="margin-top:0;">竞品：${(it.competitors || []).length ? escapeHtml(it.competitors.join("、")) : "无"}</div>
+      <div class="qa-meta" style="margin-top:0;">高置信度竞品：${(it.competitors || []).length ? escapeHtml(it.competitors.map(competitorDisplayName).join("、")) : "未识别到高置信度竞品"}</div>
       <div class="qa-meta" style="margin-top:0;">引用来源：${(it.citations || []).length} 个</div>
       <div class="qa-meta" style="margin-top:0;">GEO Gap：${gapLabels}</div>
       <div style="font-size:13px;margin-top:6px;line-height:1.6;">${escapeHtml(it.diagnosis_summary || "")}</div>
@@ -1113,6 +1113,13 @@ function renderSettings() {
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+// brand_parser 的 competitors 现在是 Precision First 结构化数据
+// {name, aliases, confidence, evidence}，统一转成"中文名 / 英文别名"展示。
+function competitorDisplayName(c) {
+  if (c.aliases && c.aliases.length) return c.name + " / " + c.aliases[0];
+  return c.name;
 }
 
 function render() {

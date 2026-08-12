@@ -1,17 +1,29 @@
 """
-GEO 回答结构化解析模块 - 第一版
-只用确定性规则（字符串匹配 / 正则 / 简单结构识别），不调用任何AI模型去"猜"排名或品牌。
-拿不准的字段一律返回 None / 空值，由调用方（前端）显示为"无法判断"，绝不编造。
+GEO 回答结构化解析模块
+
+只用确定性规则（字符串匹配 / 正则 / 简单结构识别 / 维护的品牌词典），
+不调用任何AI模型去"猜"排名或品牌。拿不准的字段一律返回 None / 空值，
+由调用方（前端）显示为"无法判断"，绝不为了让结果看起来丰富而编造。
+
+竞品识别原则：Precision First，高精度优先。
+宁可漏掉真实竞品，也绝不能把普通词、形容词、短语、国家地区、产品技术
+词汇识别成品牌。只有满足下列任一高置信度结构，且通过强制排除词库校验
+的候选词，才会进入 competitors：
+1. Markdown/纯文本里的"中文品牌名（英文名）"括号结构
+2. 命中人工维护的 KNOWN_BRANDS 品牌词典（不要求任何特定文本结构）
+3. "品牌：X" / "品牌有A、B、C" / "推荐品牌包括A、B、C" 这类明确的品牌
+   枚举/提示句式（仍然要通过排除词库校验，结构本身不是充分条件）
+没有任何高置信度候选时，competitors 就是空列表，不做兜底猜测。
 
 已知局限（如实说明，不夸大准确率）：
-- 竞品品牌抽取是基于"编号列表项 / X品牌 / X车载冰箱 / X厂家"等文本模式的启发式规则，
-  不是基于人工维护的品牌词库，也不是NLP实体识别模型，存在漏检和误检的可能，
-  建议第一版上线后人工抽样核对，再考虑是否需要补充品牌词库或引入更强的解析方式。
+- KNOWN_BRANDS 是人工维护的品牌词典，覆盖有限，新品牌需要手动补充才能
+  被识别；不在词典里、又没有中英文括号结构或明确"品牌："提示的竞品会被
+  漏掉——这是"宁可漏检也不能误判"这个设计取舍的直接代价。
 - 排名判定只在能识别出"编号列表 / 中文序数词"结构、且本方品牌落在其中时才给出，
   没有这种结构就一律返回 None，不做任何基于常识的推测。
 - 推荐语义判定以"句子"为单位（句子边界：。！？；;和换行），在同一句内查找推荐类关键词，
   不再依赖固定字符窗口。如果一句话里同时议论了多个品牌（例如"A是首选，B仅供参考"），
-  规则解析无法区分关键词具体指向谁，这是和竞品抽取一样的、已知的启发式局限。
+  规则解析无法区分关键词具体指向谁。
 - 品牌提及的否定识别（如"没有提到XX"）只覆盖了常见的否定触发词组合，不是通用的NLP
   否定检测，遇到未覆盖的否定表达方式仍可能被误判为"提及"。
 """
@@ -47,64 +59,16 @@ NEGATED_MENTION_PATTERN = re.compile(
 # 因为"品牌名与推荐语之间有描述文字"这种场景常用逗号分隔，需要留在同一句里判断。
 SENTENCE_SPLIT_PATTERN = re.compile(r'[。！？\n；;]')
 
-# 编号/项目符号列表项： "1. xxx" "1、xxx" "①xxx" "-xxx" "*xxx" 等
+# 编号/项目符号列表项： "1. xxx" "1、xxx" "①xxx" "-xxx" "*xxx" 等。
+# 仅用于"排名"判定（本方品牌落在第几个列表项里），不再用于竞品抽取——
+# 详见下方竞品识别部分的说明。
 LIST_MARKER_PATTERN = re.compile(
     r'(?:^|\n)\s*(?:[0-9]{1,2}[.、)．]|[①②③④⑤⑥⑦⑧⑨⑩]|[-•*])\s*([^\n]+)'
-)
-
-# 判断一个列表项"看起来是不是品牌开头"：要求候选词（2-6字，比通用的{2,8}更严格，
-# 真实品牌名基本不超过6字）紧跟着"（英文名）/——/-/："这类"品牌名后接说明"的
-# 分隔符。很多真实DeepSeek的列表其实是"购买建议/注意事项"而不是"品牌排名"，
-# 例如"1. 只是放几瓶水，不需要买太大容量的" "2. 挑选时注意压缩机品牌"——这类
-# 列表项完全没有品牌名开头，如果只是无脑截取每条前2-8个字，会把整句话的开头
-# 当成"品牌名"污染竞品统计。没有这个分隔符信号时宁可不提取，也不编造。
-BRAND_LED_LIST_ITEM_PATTERN = re.compile(
-    r'^([A-Za-z一-龥]{2,6})(?=\s*(?:[\(（]|[—－-]|[:：]))'
 )
 
 ORDINAL_WORDS = ["第一", "第二", "第三", "第四", "第五", "第六", "第七", "第八"]
 
 URL_PATTERN = re.compile(r'https?://[^\s\)\]\>，。；、"\'》]+')
-
-# "XX品牌" "XX车载冰箱" "XX厂家" 这种紧邻关键词的命名模式。
-# 边界故意收紧到"，,、:：（("这类"列举中的一项"信号，不包括句首(^)/句号(。)/
-# 空白(\s)——真实DeepSeek长回答里，"国内品牌""这类品牌""关于...品牌""主流品牌"
-# "有些品牌"这种泛泛而谈的描述句，几乎每一句都会在句首或空白后触发一次误抽取
-# （曾经把"这类""关于""选择""主流""国内""有些"整批抽成"竞品品牌"）。用句首/句号/
-# 空白做边界太容易撞上新起一句的位置，宁可漏检一些行文里句首出现的真实品牌名，
-# 也不能让通用描述词大批量污染竞品统计。
-BRAND_SUFFIX_PATTERN = re.compile(
-    r'(?<=[，,、:：\(（])([A-Za-z一-龥]{2,8})(?:品牌|车载冰箱|厂家)'
-)
-
-# "品牌有A、B、C" "厂家推荐：A、B和C" "推荐以下品牌：A、B、C" 这种并列列表。
-# 触发词支持"有/包括/如/推荐"这几个动词，也支持"品牌/厂家"后面直接跟冒号
-# （真实DeepSeek回答里"以下几个品牌：A、B、C"这种冒号直接列举极常见，
-# 原来要求动词紧跟冒号，漏掉了这种没有动词、直接用冒号列举的写法）。
-# 分隔符支持顿号"、"及中文连接词"和""及"，这两种连接词在这类语境里同样表示
-# "并列的最后一项"而不是另起一句；不用逗号/句号，因为它们通常表示切换到不相关的
-# 另一个小句，用它们切分会把无关的后半句错误地并入候选列表。
-BRAND_LIST_PATTERN = re.compile(
-    r'(?:品牌|厂家)(?:(?:有|包括|如|推荐)[:：]?|[:：])\s*'
-    r'((?:[A-Za-z一-龥]{2,8}(?:、|和|及))+[A-Za-z一-龥]{2,8}(?=[，,。;；:：\s、！？]|$))'
-)
-
-# 车载冰箱行业/GEO场景下常见的通用词，不是具体品牌名，抽取到要过滤掉
-# 含关系一律过滤（而不仅是完全相等），避免"车载冰箱推荐以下""选择车载冰箱"
-# 这类夹带通用词的整句被 BRAND_SUFFIX_PATTERN 误当成品牌名抽出来。
-GENERIC_TERMS = {
-    "车载冰箱", "冰箱", "压缩机", "品牌", "厂家", "产品", "市场", "行业",
-    "消费者", "用户", "价格", "质量", "性能", "选购", "推荐",
-    "老牌", "知名", "正规", "靠谱", "以下", "如下", "这些", "上述",
-    "目前", "常见", "市面上", "众多", "部分", "某些",
-    # 泛指/关联词和国家名：真实DeepSeek长回答里常以"国内品牌""关于XX品牌"
-    # "选择品牌时""主流品牌""是全球品牌""源自XX的品牌""有些品牌"这类句式
-    # 展开描述，这些词不是品牌名，作为 BRAND_SUFFIX_PATTERN 的兜底过滤。
-    "关于", "这类", "那些", "选择", "主流", "国内", "国外", "有些",
-    "全球", "源自", "各种", "不同", "多个", "一些", "其中", "包括",
-    "中国", "意大利", "美国", "德国", "日本", "韩国", "法国", "英国",
-    "也有", "还有", "并有", "又有", "更有", "没有",
-}
 
 
 def _clean_candidate(name: str) -> str:
@@ -165,6 +129,187 @@ def _has_recommend_keyword(sentence: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# 竞品识别 - Precision First
+# ---------------------------------------------------------------------------
+
+# 人工维护的已知品牌词典。命中词典的候选词直接视为高置信度品牌，不要求任何
+# 特定文本结构；需要持续补充维护。普能达/PUNEDA 是本方品牌，不放进这里
+# （避免被误判成"竞品"），本方品牌的识别用 BRAND_ALIASES 单独处理。
+KNOWN_BRANDS = [
+    {"name": "英得尔", "aliases": ["Indel B", "IndelB"]},
+    {"name": "冰虎", "aliases": ["Alpicool"]},
+    {"name": "科敏", "aliases": ["KEMIN"]},
+    {"name": "美固", "aliases": ["MOBICOOL"]},
+    {"name": "百事泰", "aliases": ["BESTTEN"]},
+    {"name": "纽曼", "aliases": ["Newsmy"]},
+    {"name": "ICECO", "aliases": []},
+    {"name": "Dometic", "aliases": []},
+    {"name": "Engel", "aliases": []},
+    {"name": "ARB", "aliases": []},
+]
+
+# 强制排除词库：命中即拒绝，不管候选词是从哪种结构里抽出来的。
+# 分类维护，方便后续继续补充；实际过滤时统一按"是否为子串"处理。
+FORBIDDEN_WORDS = {
+    # 普通功能词/连接词/代词
+    "挑选", "选择", "推荐", "这个", "那个", "如果", "因为", "所以", "但是",
+    "只看", "不能只看", "决定", "涉足", "适合", "这类", "那些", "有些",
+    "也有", "还有", "并有", "又有", "更有", "没有", "关于", "其中", "包括",
+    "各种", "不同", "多个", "一些", "众多", "部分", "某些", "目前", "常见",
+    "市面上", "以下", "如下", "这些", "上述", "老牌", "知名", "正规",
+    "靠谱", "主流", "全球", "源自",
+    # 品牌描述词
+    "国产", "进口", "国内", "国外", "国内高端", "国产头部", "国际品牌",
+    "主流品牌", "高端品牌", "性价比品牌",
+    # 产品技术词
+    "压缩机", "半导体", "制冷", "制热", "电压保护", "APP", "12V", "24V",
+    "双温区", "单温区", "车载冰箱", "冰箱",
+    # 国家地区
+    "中国", "美国", "德国", "意大利", "欧洲", "日本", "韩国", "法国", "英国",
+    # 商业描述词
+    "厂家", "制造商", "供应商", "OEM", "ODM", "经销商", "品牌", "产品",
+    "市场", "售后", "优势", "行业", "消费者", "用户", "价格", "质量",
+    "性能", "选购",
+}
+
+# "中文品牌名（英文名）"括号结构，允许两侧带 Markdown 加粗符号 **。
+# 例如 "**英得尔（Indel B）**" "冰虎（Alpicool）" "美固(MOBICOOL)"。
+# 中文名前面要求有边界（句首/空白/标点/顿号/连接词"和、及、与"），否则
+# {2,8}贪婪匹配会把"包括""和"这类前面的虚词也吞进候选品牌名里，
+# 比如把"推荐品牌包括英得尔（Indel B）"错误截成"荐品牌包括英得尔"。
+CN_EN_BRAND_PATTERN = re.compile(
+    r'(?:(?<=^)|(?<=[\s，,。;；:：、\(（\*])|(?<=和)|(?<=及)|(?<=与))'
+    r'\*{0,2}([一-龥]{2,8})\*{0,2}[（(]([A-Za-z][A-Za-z0-9 .\-]{1,24})[）)]\*{0,2}'
+)
+
+# "品牌有A、B、C" "厂家推荐：A、B和C" "推荐以下品牌：A、B、C" 这种并列列表。
+# 触发词支持"有/包括/如/推荐"这几个动词，也支持"品牌/厂家"后面直接跟冒号。
+# 分隔符支持顿号"、"及中文连接词"和""及"。
+BRAND_LIST_PATTERN = re.compile(
+    r'(?:品牌|厂家)(?:(?:有|包括|如|推荐)[:：]?|[:：])\s*'
+    r'((?:[A-Za-z一-龥]{2,8}(?:、|和|及))+[A-Za-z一-龥]{2,8}(?=[，,。;；:：\s、！？]|$))'
+)
+
+# "品牌：冰虎" 这种单个品牌的明确提示句式（没有并列结构，BRAND_LIST_PATTERN
+# 覆盖不到）。
+BRAND_HINT_PATTERN = re.compile(
+    r'品牌[:：]\s*([A-Za-z一-龥]{2,8})(?=[，,。;；\s]|$)'
+)
+
+
+def _is_own_brand(name: str) -> bool:
+    return any(alias.lower() in name.lower() for alias in BRAND_ALIASES)
+
+
+def is_valid_brand_candidate(candidate: str, evidence: str = "") -> tuple:
+    """判断一个候选词是否可能是真实品牌名。返回 (是否有效, 原因说明)。
+    只做确定性规则判断：命中任意一条排除条件就判定无效，不做任何语义推测。
+    """
+    name = _clean_candidate(candidate)
+    if not name:
+        return False, "空字符串"
+    if len(name) < 2:
+        return False, "长度过短，不像品牌名"
+    if len(name) > 8:
+        return False, "长度过长，更像描述性短语而非品牌名"
+    if "的" in name:
+        return False, "含虚词'的'，像描述性短语/从句片段"
+    if _is_own_brand(name):
+        return False, "包含本方品牌名，不能算竞品"
+    if any(term in name for term in FORBIDDEN_WORDS):
+        return False, "命中强制排除词库（普通词/描述词/产品技术/国家地区/商业用语）"
+    if not re.search(r'[A-Za-z一-龥]', name):
+        return False, "不含有效的中英文字符"
+    return True, "通过校验"
+
+
+def _match_known_brand(name: str, aliases):
+    """尝试把候选词（含已发现的别名）归一化到 KNOWN_BRANDS 里的标准条目。"""
+    candidates = [name] + list(aliases)
+    for brand in KNOWN_BRANDS:
+        brand_names = [brand["name"]] + brand["aliases"]
+        for c in candidates:
+            for bn in brand_names:
+                if c.lower() == bn.lower():
+                    return brand
+    return None
+
+
+def _scan_known_brands(text: str):
+    """在全文里直接扫描 KNOWN_BRANDS 词典命中的品牌，不要求任何特定文本结构。"""
+    found = []
+    for brand in KNOWN_BRANDS:
+        for name_variant in [brand["name"]] + brand["aliases"]:
+            flags = re.IGNORECASE if name_variant.isascii() else 0
+            m = re.search(re.escape(name_variant), text, flags)
+            if m:
+                found.append((brand["name"], list(brand["aliases"]), m.group(0)))
+                break  # 同一品牌命中一个别名就够了
+    return found
+
+
+def extract_competitors(text: str) -> list:
+    """Precision First 竞品识别：只接受高置信度结构 + 通过排除词库校验的候选，
+    每条都带 evidence（原文片段），按首次发现顺序返回结构化列表：
+    [{"name": str, "aliases": [str], "confidence": "high", "evidence": str}, ...]
+    没有任何高置信度候选时返回空列表，不做兜底猜测。
+    """
+    competitors = []
+    seen_keys = {}  # normalized_key -> competitors 里对应条目的下标
+
+    def register(name: str, aliases, evidence: str):
+        name = _clean_candidate(name)
+        ok, _reason = is_valid_brand_candidate(name, evidence)
+        if not ok:
+            return
+        canonical = _match_known_brand(name, aliases)
+        if canonical:
+            final_name = canonical["name"]
+            final_aliases = list(canonical["aliases"])
+        else:
+            final_name = name
+            final_aliases = [a for a in aliases if a]
+
+        key = final_name.lower()
+        if key in seen_keys:
+            existing = competitors[seen_keys[key]]
+            for a in final_aliases:
+                if a not in existing["aliases"]:
+                    existing["aliases"].append(a)
+            # 换成更具体的原文片段作为evidence（比如后来发现了完整的
+            # "中文（英文）"结构，比词典命中时只截到裸中文名更有说服力）。
+            if len(evidence.strip()) > len(existing["evidence"]):
+                existing["evidence"] = evidence.strip()
+            return
+        seen_keys[key] = len(competitors)
+        competitors.append({
+            "name": final_name,
+            "aliases": final_aliases,
+            "confidence": "high",
+            "evidence": evidence.strip(),
+        })
+
+    # 来源1：已知品牌词典，全文直接扫描，不依赖任何文本结构。
+    for name, aliases, evidence in _scan_known_brands(text):
+        register(name, aliases, evidence)
+
+    # 来源2："中文品牌名（英文名）"括号结构，中英文配对本身就是强证据。
+    for m in CN_EN_BRAND_PATTERN.finditer(text):
+        register(m.group(1), [m.group(2).strip()], m.group(0))
+
+    # 来源3：明确的"品牌有/包括/推荐/：A、B、C"并列列表。
+    for m in BRAND_LIST_PATTERN.finditer(text):
+        for piece in re.split(r'、|和|及', m.group(1)):
+            register(piece, [], piece)
+
+    # 来源4："品牌：X"单个品牌的明确提示句式。
+    for m in BRAND_HINT_PATTERN.finditer(text):
+        register(m.group(1), [], m.group(0))
+
+    return competitors
+
+
 def parse_geo_answer(raw_answer: str, model: str) -> dict:
     text = raw_answer or ""
 
@@ -181,7 +326,7 @@ def parse_geo_answer(raw_answer: str, model: str) -> dict:
             brand_mention_matches.extend((alias, m) for m in matches)
     brand_mentioned = mention_count > 0
 
-    # 识别列表结构，供排名判定 + 竞品抽取共用
+    # 识别列表结构，仅供排名判定使用
     list_items = LIST_MARKER_PATTERN.findall(text)
 
     # 4：排名。只有识别到明确的列表/序数结构，且本方品牌落在其中才给出数值，否则 None
@@ -201,48 +346,8 @@ def parse_geo_answer(raw_answer: str, model: str) -> dict:
                 rank = i
                 break
 
-    # 5 & 6：竞品抽取 + 首次出现顺序
-    competitor_order = []
-    seen = set()
-
-    def add_candidate(name: str):
-        name = _clean_candidate(name)
-        if not name or len(name) < 2 or len(name) > 12:
-            return
-        # 含"的"几乎必然说明抓到的是描述性短句/从句片段（如"售后完善的"），
-        # 真实品牌名不会带这个虚词，直接过滤。
-        if "的" in name:
-            return
-        # 只要候选词里夹带任一通用词就过滤（而非要求完全相等），
-        # 拦掉"车载冰箱推荐以下""选择车载冰箱"这类整句被误抽的情况。
-        if any(term in name for term in GENERIC_TERMS):
-            return
-        # 含关系而非完全相等：拦掉"普能达是一家车载冰箱生产厂家"这种本方品牌名
-        # 紧跟描述文字、被 BRAND_SUFFIX_PATTERN 一起抓进候选词的情况——真实竞品名
-        # 不可能包含本方品牌的字符串。这是深度诊断批量测试中新发现的问题，
-        # 快速诊断走的是同一套 brand_parser，此前没被现有用例覆盖到。
-        if any(alias.lower() in name.lower() for alias in BRAND_ALIASES):
-            return
-        key = name.lower()
-        if key in seen:
-            return
-        seen.add(key)
-        competitor_order.append(name)
-
-    for item in list_items:
-        cleaned = re.sub(r'^(推荐|品牌|厂家)[:：]?', '', item).strip()
-        m = BRAND_LED_LIST_ITEM_PATTERN.match(cleaned)
-        if m:
-            add_candidate(m.group(1))
-
-    for m in BRAND_SUFFIX_PATTERN.finditer(text):
-        add_candidate(m.group(1))
-
-    for m in BRAND_LIST_PATTERN.finditer(text):
-        for piece in re.split(r'、|和|及', m.group(1)):
-            add_candidate(piece)
-
-    competitors = competitor_order[:]  # 当前版本二者内容一致，均按首次出现顺序排列
+    # 5 & 6：竞品识别（Precision First，只保留高置信度、带evidence的候选）
+    competitors = extract_competitors(text)
 
     # 3：推荐状态。
     # 品牌落在识别到的排名列表中——出现在"推荐列表"里本身就是一种推荐信号；
@@ -275,7 +380,6 @@ def parse_geo_answer(raw_answer: str, model: str) -> dict:
         "recommended": recommended,
         "rank": rank,
         "competitors": competitors,
-        "competitor_order": competitor_order,
         "citations": citations,
         "citation_count": len(citations),
         "model": model,

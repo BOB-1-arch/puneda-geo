@@ -29,7 +29,11 @@ def _success_item_payload(q, brand_mentioned=False, rank=None, citations=None):
         "tested_at": "2026-08-12 00:00:00",
         "brand_mentioned": brand_mentioned, "mention_count": 1 if brand_mentioned else 0,
         "recommended": False, "rank": rank,
-        "competitors": ["英得尔", "冰虎"], "citations": citations or [],
+        "competitors": [
+            {"name": "英得尔", "aliases": ["Indel B"], "confidence": "high", "evidence": "英得尔"},
+            {"name": "冰虎", "aliases": ["Alpicool"], "confidence": "high", "evidence": "冰虎"},
+        ],
+        "citations": citations or [],
         "answer_fit": "partial", "industry_knowledge_quality": "low",
         "gaps": [{"type": "BRAND_ABSENCE", "label": "品牌未进入AI答案", "evidence": "..."}],
         "diagnosis_summary": "...", "observations": ["..."], "inferences": ["..."],

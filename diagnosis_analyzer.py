@@ -28,6 +28,17 @@ from brand_parser import BRAND_ALIASES
 BRAND_NAME_CN = BRAND_ALIASES[0]
 BRAND_NAME_EN = BRAND_ALIASES[1]
 BRAND_WEBSITE = "https://www.pnda.com.cn"
+
+
+def _competitor_display_name(competitor: dict) -> str:
+    """brand_parser 现在把 competitors 做成 Precision First 的结构化数据
+    {name, aliases, confidence, evidence}，这里统一转成"中文名 / 英文别名"
+    这种展示字符串，供各处拼 evidence/observation 文案时复用。
+    """
+    aliases = competitor.get("aliases") or []
+    if aliases:
+        return f"{competitor.get('name', '')} / {aliases[0]}"
+    return competitor.get("name", "")
 INDUSTRY = "车载冰箱"
 
 # ---------------------------------------------------------------------------
@@ -265,9 +276,10 @@ def detect_gaps(
     gaps = []
 
     if not brand_mentioned:
-        comp_str = f'（{"、".join(competitors[:6])}）' if competitors else ""
+        comp_names = [_competitor_display_name(c) for c in competitors[:6]]
+        comp_str = f'（{"、".join(comp_names)}）' if comp_names else ""
         evidence = (
-            f'本次回答共识别到 {len(competitors)} 个竞品品牌{comp_str}，'
+            f'本次回答共识别到 {len(competitors)} 个高置信度竞品品牌{comp_str}，'
             f'但未出现"{BRAND_NAME_CN}"或"{BRAND_NAME_EN}"。'
         )
         gaps.append(_gap("BRAND_ABSENCE", evidence))
@@ -302,7 +314,11 @@ def detect_gaps(
         gaps.append(_gap("QUERY_INTENT_MISMATCH", evidence))
 
     if not brand_mentioned and len(competitors) >= 3:
-        evidence = f'回答中出现了 {len(competitors)} 个竞品品牌（{"、".join(competitors[:6])}），"{BRAND_NAME_CN}"未进入候选范围。'
+        comp_names = [_competitor_display_name(c) for c in competitors[:6]]
+        evidence = (
+            f'回答中出现了 {len(competitors)} 个高置信度竞品品牌（{"、".join(comp_names)}），'
+            f'"{BRAND_NAME_CN}"未进入候选范围。'
+        )
         gaps.append(_gap("COMPETITOR_DOMINANCE", evidence))
 
     if not citations:
@@ -343,7 +359,8 @@ def build_observations(question: str, parsed: dict, query_intent_label: str) -> 
     else:
         obs.append(f'"{BRAND_NAME_CN}"/"{BRAND_NAME_EN}"未在原始回答中出现。')
     obs.append(f'识别到的排序信息：{("第%d位" % rank) if rank is not None else "无（未识别到明确的排序结构）"}。')
-    obs.append(f'识别到的竞品品牌：{("、".join(competitors)) if competitors else "无"}。')
+    comp_display = "、".join(_competitor_display_name(c) for c in competitors)
+    obs.append(f'识别到的高置信度竞品品牌：{comp_display if comp_display else "无"}。')
     obs.append(f'识别到的引用来源数量：{len(citations)}。')
     return obs
 

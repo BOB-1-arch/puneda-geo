@@ -212,7 +212,7 @@ class DeepItemIn(BaseModel):
     mention_count: int | None = None
     recommended: bool | None = None
     rank: int | None = None
-    competitors: list[str] | None = None
+    competitors: list[dict] | None = None  # brand_parser 的结构化竞品 {name,aliases,confidence,evidence}
     citations: list[str] | None = None
     answer_fit: str | None = None
     industry_knowledge_quality: str | None = None
