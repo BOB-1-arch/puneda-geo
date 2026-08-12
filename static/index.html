@@ -117,6 +117,26 @@ const QUESTION_TYPES_GLOBAL = ["Brand awareness","Brand recommendation","Product
 
 const TIERS = [{id:"quick",label:"快速",count:20},{id:"standard",label:"标准",count:50},{id:"deep",label:"深度",count:100}];
 
+// 深度诊断的问题类型UI沿用已有的 questionTypes 标签（不新增页面/不改布局），
+// 提交给后端时翻译成 diagnosis_analyzer 的 Query Intent 编码。
+// 未选择任何类型时不传 intents，后端按默认分布抽题（B2B高价值Query占较高比例）。
+const DEEP_INTENT_MAP = {
+  "品牌认知": "consumer_brand", "品牌推荐": "consumer_brand",
+  "产品推荐": "consumer_product",
+  "品牌对比": "comparison", "产品对比": "comparison",
+  "厂家寻找": "manufacturer", "OEM": "OEM", "ODM": "ODM",
+  "汽车主机厂配套": "automotive_supplier", "经销商采购": "distributor_procurement",
+  "露营/户外场景": "usage", "房车场景": "usage", "自驾场景": "usage", "产品使用": "usage",
+  "售后问题": "after_sales", "采购决策": "distributor_procurement",
+};
+
+const INTENT_LABELS_CN = {
+  consumer_brand: "C端品牌", consumer_product: "C端产品", manufacturer: "厂家寻找",
+  OEM: "OEM", ODM: "ODM", automotive_supplier: "主机厂/配套",
+  distributor_procurement: "经销商采购", technical: "技术问题", usage: "使用问题",
+  after_sales: "售后问题", comparison: "对比问题", other: "其他",
+};
+
 function makePlatforms(names) {
   return names.map((name, i) => ({
     id: name + "-" + i, name, status: "not_connected", connectMethod: "", enabled: true,
@@ -156,6 +176,13 @@ const state = {
   quickResults: null,       // {questions:[...], resultsByQuestion: {q: [{platform, ...}]}}
   quickRunning: false,
   deepMessages: null,
+  deepRunning: false,
+  deepProgress: null,       // {runId, total, done, success, failed, currentQuestion, items:[]}
+  deepReport: null,         // {run, report, items} 最近一次刚跑完的深度诊断
+  deepItemsFilter: "all",
+  dashboardLatest: null,    // {run, report, items} | {run:null} 最新一次已完成的深度诊断
+  historyRuns: null,        // 诊断历史列表
+  historyDetail: null,      // 点开的某一次历史详情 {run, report, items}
 };
 // 默认全选所有平台
 state.selectedQuick = new Set(state.data.cn.platforms.map(p => p.id));
@@ -208,10 +235,93 @@ async function diagnoseGeo(question, rawAnswer, model) {
   return res.json(); // { parsed, diagnosis }
 }
 
+async function deepStart(market, platform, intents, count) {
+  const res = await fetch(BACKEND_URL + "/api/diagnose/deep/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ market, platform, intents: intents && intents.length ? intents : null, count }),
+  });
+  if (!res.ok) {
+    let detail = "创建深度诊断任务失败（状态码 " + res.status + "）";
+    try { const err = await res.json(); if (err.detail) detail = err.detail; } catch (e) {}
+    throw new Error(detail);
+  }
+  return res.json(); // { run_id, questions: [{question, query_intent, commercial_value}, ...] }
+}
+
+async function deepSaveItem(runId, item) {
+  const res = await fetch(BACKEND_URL + "/api/diagnose/deep/" + runId + "/item", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(item),
+  });
+  if (!res.ok) throw new Error("保存该题结果失败（状态码 " + res.status + "）");
+  return res.json();
+}
+
+async function deepComplete(runId) {
+  const res = await fetch(BACKEND_URL + "/api/diagnose/deep/" + runId + "/complete", { method: "POST" });
+  if (!res.ok) throw new Error("汇总深度诊断结果失败（状态码 " + res.status + "）");
+  return res.json(); // { run, report, items }
+}
+
+async function deepFetchRuns() {
+  const res = await fetch(BACKEND_URL + "/api/diagnose/deep/runs");
+  if (!res.ok) throw new Error("获取诊断历史失败（状态码 " + res.status + "）");
+  return res.json(); // { runs: [...] }
+}
+
+async function deepFetchRunDetail(runId) {
+  const res = await fetch(BACKEND_URL + "/api/diagnose/deep/runs/" + runId);
+  if (!res.ok) throw new Error("获取诊断详情失败（状态码 " + res.status + "）");
+  return res.json(); // { run, report, items }
+}
+
+async function deepFetchLatest() {
+  const res = await fetch(BACKEND_URL + "/api/diagnose/deep/latest");
+  if (!res.ok) throw new Error("获取最新深度诊断失败（状态码 " + res.status + "）");
+  return res.json(); // { run, report, items }
+}
+
+async function loadDashboardLatest() {
+  try {
+    state.dashboardLatest = await deepFetchLatest();
+  } catch (e) {
+    state.dashboardLatest = state.dashboardLatest || { run: null };
+  }
+  if (state.page === "dashboard") render();
+}
+
+async function loadHistoryList() {
+  try {
+    const data = await deepFetchRuns();
+    state.historyRuns = data.runs;
+  } catch (e) {
+    state.historyRuns = state.historyRuns || [];
+  }
+  if (state.page === "history") render();
+}
+
+async function openHistoryDetail(runId) {
+  try {
+    state.historyDetail = await deepFetchRunDetail(runId);
+  } catch (e) {
+    state.historyDetail = null;
+    state.deepMessages = ["加载诊断历史详情失败 — " + e.message];
+  }
+  render();
+}
+function closeHistoryDetail() { state.historyDetail = null; render(); }
+
 /* ---------------- 交互逻辑 ---------------- */
 
 function setMarket(m) { state.market = m; state.quickResults = null; state.deepMessages = null; render(); }
-function setPage(p) { state.page = p; render(); }
+function setPage(p) {
+  state.page = p;
+  if (p === "dashboard") loadDashboardLatest();
+  if (p === "history") { state.historyDetail = null; loadHistoryList(); }
+  render();
+}
 
 function toggleSelected(setObj, id) {
   setObj.has(id) ? setObj.delete(id) : setObj.add(id);
@@ -273,14 +383,113 @@ async function startQuick() {
   render();
 }
 
-function startDeep() {
+async function startDeep() {
   const cur = d();
-  const platforms = cur.platforms.filter(p => state.selectedDeep.has(p.id));
-  state.deepMessages = platforms.map(p =>
-    p.status === "connected"
-      ? p.name + "：已连接（深度诊断的批量执行逻辑尚未开发，当前阶段仅快速诊断可真实调用）"
-      : p.name + "：API未连接"
+
+  if (cur.deepTier !== "quick") {
+    state.deepMessages = ["本轮只真实开发了「快速 · 20题」深度诊断，标准/深度规模尚未开发。"];
+    render();
+    return;
+  }
+
+  const platforms = cur.platforms.filter(p =>
+    state.selectedDeep.has(p.id) && p.status === "connected" && p.name === "DeepSeek"
   );
+  if (platforms.length === 0) {
+    state.deepMessages = ["请先勾选已连接的 DeepSeek 平台（本轮深度诊断仅支持 DeepSeek）。"];
+    render();
+    return;
+  }
+
+  const intents = Array.from(new Set(
+    Array.from(cur.deepCategories).map(t => DEEP_INTENT_MAP[t]).filter(Boolean)
+  ));
+
+  state.deepMessages = null;
+  state.deepReport = null;
+  state.deepItemsFilter = "all";
+  state.deepRunning = true;
+  render();
+
+  let started;
+  try {
+    started = await deepStart(state.market, "DeepSeek", intents, 20);
+  } catch (e) {
+    state.deepRunning = false;
+    state.deepMessages = ["创建深度诊断任务失败 — " + e.message];
+    render();
+    return;
+  }
+
+  const { run_id, questions } = started;
+  state.deepProgress = { runId: run_id, total: questions.length, done: 0, success: 0, failed: 0, currentQuestion: "" };
+  render();
+
+  const items = [];
+  for (const q of questions) {
+    state.deepProgress.currentQuestion = q.question;
+    render();
+
+    let item;
+    try {
+      const askData = await askDeepSeek(q.question);
+      const diagResult = await diagnoseGeo(q.question, askData.raw_answer, askData.model);
+      item = {
+        question: q.question,
+        query_intent: q.query_intent,
+        commercial_value: q.commercial_value,
+        platform: "DeepSeek",
+        status: "success",
+        raw_answer: askData.raw_answer,
+        model: askData.model,
+        tested_at: new Date().toLocaleString("zh-CN", { hour12: false }),
+        brand_mentioned: diagResult.parsed.brand_mentioned,
+        mention_count: diagResult.parsed.mention_count,
+        recommended: diagResult.parsed.recommended,
+        rank: diagResult.parsed.rank,
+        competitors: diagResult.parsed.competitors,
+        citations: diagResult.parsed.citations,
+        answer_fit: diagResult.diagnosis.answer_fit,
+        industry_knowledge_quality: diagResult.diagnosis.industry_knowledge_quality,
+        gaps: diagResult.diagnosis.gaps,
+        diagnosis_summary: diagResult.diagnosis.diagnosis_summary,
+        observations: diagResult.diagnosis.observations,
+        inferences: diagResult.diagnosis.inferences,
+        actions: diagResult.diagnosis.action_items,
+      };
+      state.deepProgress.success += 1;
+    } catch (e) {
+      item = {
+        question: q.question,
+        query_intent: q.query_intent,
+        commercial_value: q.commercial_value,
+        platform: "DeepSeek",
+        status: "failed",
+        error_message: e.message,
+      };
+      state.deepProgress.failed += 1;
+    }
+
+    try { await deepSaveItem(run_id, item); } catch (e) { /* 单条保存失败不阻断剩余题目 */ }
+
+    items.push(item);
+    state.deepProgress.done += 1;
+    render();
+  }
+
+  state.deepProgress.currentQuestion = "";
+  let completed;
+  try {
+    completed = await deepComplete(run_id);
+  } catch (e) {
+    state.deepRunning = false;
+    state.deepMessages = ["20题已全部执行完成，但汇总统计失败 — " + e.message];
+    render();
+    return;
+  }
+
+  state.deepReport = completed;
+  state.deepRunning = false;
   render();
 }
 
@@ -349,11 +558,51 @@ function renderDashboard() {
         </div>
       </div>
     </div>
+  `;
+
+  const latest = state.dashboardLatest;
+  const hasData = !!(latest && latest.run);
+  const s = hasData ? latest.report.stats : null;
+  const dkpi = (label, value) => `<div class="kpi-card"><div class="kpi-label">${label}</div><div class="kpi-value" style="${value !== "--" ? "color:#14213A;" : ""}">${value}</div></div>`;
+
+  html += `
     <div class="kpi-grid">
-      ${["GEO Score","品牌提及率","品牌推荐率","Top3出现率","平均排名","Citation Rate"].map(l =>
-        `<div class="kpi-card"><div class="kpi-label">${l}</div><div class="kpi-value">--</div></div>`).join("")}
+      ${dkpi("GEO Score", "--")}
+      ${dkpi("品牌提及率", hasData && s.brand_mention_rate != null ? s.brand_mention_rate + "%" : "--")}
+      ${dkpi("品牌推荐率", hasData && s.recommend_rate != null ? s.recommend_rate + "%" : "--")}
+      ${dkpi("Top3出现率", hasData && s.top3_rate != null ? s.top3_rate + "%" : "--")}
+      ${dkpi("平均排名", hasData && s.avg_rank != null ? s.avg_rank : "--")}
+      ${dkpi("Citation Rate", hasData && s.citation_rate != null ? s.citation_rate + "%" : "--")}
     </div>
-    <div class="hint">完成真实AI平台诊断后生成</div>
+  `;
+
+  if (!hasData) {
+    html += `<div class="hint">完成一次真实「深度诊断 · 20题」后自动生成</div>`;
+  } else {
+    html += `<div class="hint">数据来自最近一次已完成的深度诊断（完成时间：${latest.run.completed_at}，共扫描 ${s.total_questions} 题）</div>`;
+    html += `
+      <div class="kpi-grid">
+        ${dkpi("扫描问题数", s.total_questions)}
+        ${dkpi("高价值Query提及率", latest.report.high_value.brand_mention_rate != null ? latest.report.high_value.brand_mention_rate + "%" : "--")}
+      </div>
+    `;
+    html += `<div class="card"><h3>GEO Gap TOP5</h3>${
+      latest.report.gaps_top.slice(0, 5).map(g => `<div class="status-row"><span>${escapeHtml(g.label)}</span><span style="color:#6B6E64;">${g.count}</span></div>`).join("")
+      || `<div class="qa-meta">暂无</div>`
+    }</div>`;
+    html += `<div class="card"><h3>竞争品牌 TOP10</h3>${
+      latest.report.competitors_top.map(c => `<div class="status-row"><span>${escapeHtml(c.name)}</span><span style="color:#6B6E64;">${c.appearance_count}</span></div>`).join("")
+      || `<div class="qa-meta">暂无</div>`
+    }</div>`;
+    const p1 = latest.report.action_items.filter(a => a.priority === "P1");
+    html += `<div class="card"><h3>P1 优先改善任务</h3>${
+      p1.length
+        ? p1.map(a => `<div class="status-row"><span>${escapeHtml(a.action_type)} · ${escapeHtml(a.action)}</span><span style="color:#6B6E64;font-size:12px;">影响${a.affected_queries_count}条</span></div>`).join("")
+        : `<div class="qa-meta">暂无P1任务</div>`
+    }</div>`;
+  }
+
+  html += `
     <div class="card"><h3>各平台状态</h3>
       ${cur.platforms.map(p => `<div class="status-row"><span>${p.name}${!p.enabled?' <span style="color:#C7C9BF;font-size:11px;">已停用</span>':''}</span>${badge(p.status)}</div>`).join("")}
     </div>
@@ -436,6 +685,7 @@ function renderActionItems(items) {
         <div style="display:flex;gap:8px;align-items:center;margin-bottom:4px;flex-wrap:wrap;">
           <span class="badge" style="background:${c}10;color:${c};"><span class="d" style="background:${c};"></span>${escapeHtml(a.priority)}</span>
           <span class="type-tag" style="margin:0;">${escapeHtml(a.action_type)}</span>
+          ${a.affected_queries_count != null ? `<span style="font-size:12px;color:#9A9C92;">影响Query：${a.affected_queries_count}条</span>` : ""}
         </div>
         <div style="font-size:13px;margin-bottom:4px;">${escapeHtml(a.action)}</div>
         <div class="qa-meta" style="margin-top:0;">原因：${escapeHtml(a.reason)}</div>
@@ -540,6 +790,182 @@ function renderQuick() {
   return html;
 }
 
+function renderDeepProgress(p) {
+  const remaining = p.total - p.done;
+  return `
+    <div class="card">
+      <div class="kpi-label">诊断进度</div>
+      <div style="font-size:22px;font-weight:700;margin-bottom:8px;">${p.done} / ${p.total}</div>
+      <div class="qa-meta" style="margin-top:0;">当前问题：${escapeHtml(p.currentQuestion || "—")}</div>
+      <div style="display:flex;gap:18px;margin-top:10px;font-size:13px;">
+        <span>成功：<b style="color:#0E8C7F;">${p.success}</b></span>
+        <span>失败：<b style="color:#B23A2E;">${p.failed}</b></span>
+        <span>剩余：<b>${remaining}</b></span>
+      </div>
+    </div>
+  `;
+}
+
+function toggleInlinePanel(id) {
+  const el = document.getElementById(id);
+  if (el) el.style.display = el.style.display === "none" ? "block" : "none";
+}
+
+function renderHighValueSection(hv) {
+  return `
+    <div class="card">
+      <h3>【B2B高价值Query表现】</h3>
+      <div class="qa-meta" style="margin-top:0;">高价值问题数：${hv.high_value_count}</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin:8px 0;">
+        <span class="badge" style="background:#F5F6F1;color:#14213A;">品牌提及率：${hv.brand_mention_rate != null ? hv.brand_mention_rate + "%" : "无数据"}</span>
+        <span class="badge" style="background:#F5F6F1;color:#14213A;">品牌推荐率：${hv.recommend_rate != null ? hv.recommend_rate + "%" : "无数据"}</span>
+        <span class="badge" style="background:#F5F6F1;color:#14213A;">Top3率：${hv.top3_rate != null ? hv.top3_rate + "%" : "无数据"}</span>
+      </div>
+      ${hv.uncovered_questions.length ? `
+        <div class="qa-meta" style="margin-top:8px;">未覆盖高价值问题（${hv.uncovered_questions.length}）</div>
+        ${hv.uncovered_questions.map(q => `<div style="font-size:13px;padding:5px 0;border-bottom:1px solid #EFF0E9;">${escapeHtml(q)}</div>`).join("")}
+      ` : `<div class="qa-meta">高价值问题均已提及本方品牌。</div>`}
+    </div>
+  `;
+}
+
+function renderGapsTopSection(gapsTop) {
+  const top5 = gapsTop.slice(0, 5);
+  let html = `<div class="card"><h3>主要GEO问题 TOP5</h3>`;
+  if (!top5.length) {
+    html += `<div class="qa-meta">未识别到明显的GEO Gap。</div>`;
+  } else {
+    top5.forEach((g, i) => {
+      const panelId = "gap-panel-" + i;
+      html += `
+        <div style="border-bottom:1px solid #EFF0E9;padding:8px 0;">
+          <a href="#" onclick="toggleInlinePanel('${panelId}');return false;" style="font-size:13px;color:#14213A;">
+            <b>${escapeHtml(g.label)}</b>：${g.count}
+          </a>
+          <div id="${panelId}" style="display:none;margin-top:6px;">
+            ${g.questions.map(q => `<div style="font-size:12.5px;color:#6B6E64;padding:3px 0;">· ${escapeHtml(q)}</div>`).join("")}
+          </div>
+        </div>`;
+    });
+  }
+  html += `</div>`;
+  return html;
+}
+
+function renderCompetitorsTopSection(competitorsTop) {
+  let html = `<div class="card"><h3>竞争品牌 TOP10</h3>`;
+  if (!competitorsTop.length) {
+    html += `<div class="qa-meta">未识别到竞品品牌。</div>`;
+  } else {
+    html += competitorsTop.map(c => `
+      <div class="status-row"><span>${escapeHtml(c.name)}</span><span style="color:#6B6E64;font-size:12px;">出现 ${c.appearance_count} 次　识别顺序前3位 ${c.early_mention_count} 次</span></div>
+    `).join("");
+  }
+  html += `</div>`;
+  return html;
+}
+
+function renderQueryIntentDistribution(dist) {
+  const entries = Object.entries(dist);
+  return `<div class="card"><h3>Query Intent 分布</h3>
+    ${entries.length
+      ? entries.map(([intent, count]) => `<span class="type-tag">${escapeHtml(INTENT_LABELS_CN[intent] || intent)}：${count}</span>`).join("")
+      : `<div class="qa-meta">暂无数据</div>`}
+  </div>`;
+}
+
+function renderDeepItemCard(it, idx) {
+  if (it.status === "failed") {
+    return `<div class="qa-block"><b>${escapeHtml(it.question)}</b>　<span style="color:#B23A2E;">执行失败 — ${escapeHtml(it.error_message || "")}</span></div>`;
+  }
+  const mentionBadge = it.brand_mentioned
+    ? `<span class="badge badge-connected"><span class="d"></span>已提及</span>`
+    : `<span class="badge badge-not"><span class="d"></span>未提及</span>`;
+  const recBadge = it.recommended
+    ? `<span class="badge badge-connected"><span class="d"></span>推荐</span>`
+    : `<span class="badge badge-not"><span class="d"></span>未推荐</span>`;
+  const rankText = it.rank != null ? `第 ${it.rank} 位` : "无法判断";
+  const hvTag = it.commercial_value === "high" ? `<span class="type-tag" style="background:#B23A2E10;color:#B23A2E;">High Value</span>` : "";
+  const gapLabels = (it.gaps || []).map(g => escapeHtml(g.label)).join("、") || "无";
+  const rawId = "deep-raw-" + idx;
+
+  return `
+    <div class="qa-block">
+      <div style="font-weight:600;font-size:13px;">${escapeHtml(it.question)}</div>
+      <div class="qa-meta" style="margin-top:4px;">${escapeHtml(INTENT_LABELS_CN[it.query_intent] || it.query_intent || "-")}　商业价值：${escapeHtml(it.commercial_value || "-")} ${hvTag}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0;">
+        ${mentionBadge}${recBadge}
+        <span class="badge" style="background:#F5F6F1;color:#6B6E64;">排名：${rankText}</span>
+      </div>
+      <div class="qa-meta" style="margin-top:0;">竞品：${(it.competitors || []).length ? escapeHtml(it.competitors.join("、")) : "无"}</div>
+      <div class="qa-meta" style="margin-top:0;">引用来源：${(it.citations || []).length} 个</div>
+      <div class="qa-meta" style="margin-top:0;">GEO Gap：${gapLabels}</div>
+      <div style="font-size:13px;margin-top:6px;line-height:1.6;">${escapeHtml(it.diagnosis_summary || "")}</div>
+      ${(it.actions && it.actions.length) ? `<div style="margin-top:6px;">${renderActionItems(it.actions)}</div>` : ""}
+      <a href="#" onclick="toggleInlinePanel('${rawId}');return false;" style="font-size:12px;color:#6B6E64;display:inline-block;margin-top:6px;">▼ 查看原始回答</a>
+      <div id="${rawId}" style="display:none;margin-top:6px;white-space:pre-wrap;font-size:12.5px;background:#F5F6F1;border-radius:8px;padding:8px 10px;">${escapeHtml(it.raw_answer || "")}</div>
+    </div>
+  `;
+}
+
+function setDeepItemsFilter(f) { state.deepItemsFilter = f; render(); }
+
+function renderDeepItemsList(items, gapsTop) {
+  const filter = state.deepItemsFilter || "all";
+  let filtered = items;
+  if (filter === "mentioned") filtered = items.filter(it => it.status === "success" && it.brand_mentioned);
+  else if (filter === "not_mentioned") filtered = items.filter(it => it.status === "success" && !it.brand_mentioned);
+  else if (filter === "high_value") filtered = items.filter(it => it.commercial_value === "high");
+  else if (filter.startsWith("gap:")) {
+    const gapType = filter.slice(4);
+    filtered = items.filter(it => (it.gaps || []).some(g => g.type === gapType));
+  }
+
+  const gapOptions = gapsTop.map(g => `<option value="gap:${g.type}" ${filter === "gap:" + g.type ? "selected" : ""}>${escapeHtml(g.label)}</option>`).join("");
+
+  return `
+    <div class="card">
+      <h3>20题明细（${filtered.length} / ${items.length}）</h3>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;align-items:center;">
+        <button class="btn-ghost" style="${filter==='all'?'border-color:#14213A;':''}" onclick="setDeepItemsFilter('all')">全部</button>
+        <button class="btn-ghost" style="${filter==='mentioned'?'border-color:#14213A;':''}" onclick="setDeepItemsFilter('mentioned')">已提及</button>
+        <button class="btn-ghost" style="${filter==='not_mentioned'?'border-color:#14213A;':''}" onclick="setDeepItemsFilter('not_mentioned')">未提及</button>
+        <button class="btn-ghost" style="${filter==='high_value'?'border-color:#14213A;':''}" onclick="setDeepItemsFilter('high_value')">High Value</button>
+        <select onchange="setDeepItemsFilter(this.value)" style="width:auto;padding:6px 10px;font-size:12.5px;">
+          <option value="">按 Gap 类型筛选…</option>
+          ${gapOptions}
+        </select>
+      </div>
+      ${filtered.map((it, idx) => renderDeepItemCard(it, idx)).join("") || `<div class="qa-meta">没有符合筛选条件的问题。</div>`}
+    </div>
+  `;
+}
+
+function renderDeepReport(run, report, items) {
+  const s = report.stats;
+  const kpi = (label, value) => `<div class="kpi-card"><div class="kpi-label">${label}</div><div class="kpi-value" style="color:#14213A;">${value}</div></div>`;
+  let html = `
+    <div class="kpi-grid">
+      ${kpi("扫描问题数", s.total_questions)}
+      ${kpi("成功/失败", s.success_count + " / " + s.failed_count)}
+      ${kpi("品牌提及率", s.brand_mention_rate != null ? s.brand_mention_rate + "%" : "--")}
+      ${kpi("品牌推荐率", s.recommend_rate != null ? s.recommend_rate + "%" : "--")}
+      ${kpi("Top3出现率", s.top3_rate != null ? s.top3_rate + "%" : "--")}
+      ${kpi("平均排名", s.avg_rank != null ? s.avg_rank : "--")}
+      ${kpi("Citation Rate", s.citation_rate != null ? s.citation_rate + "%" : "--")}
+    </div>
+  `;
+  html += renderHighValueSection(report.high_value);
+  html += renderGapsTopSection(report.gaps_top);
+  html += renderCompetitorsTopSection(report.competitors_top);
+  html += `<div class="card"><h3>改善建议（已去重聚合）</h3>${
+    report.action_items.length ? renderActionItems(report.action_items) : `<div class="qa-meta">暂无改善建议。</div>`
+  }</div>`;
+  html += renderQueryIntentDistribution(report.query_intent_distribution);
+  html += renderDeepItemsList(items, report.gaps_top);
+  return html;
+}
+
 function renderDeep() {
   const cur = d();
   let html = `
@@ -548,14 +974,15 @@ function renderDeep() {
       <div style="display:flex;gap:8px;margin-bottom:16px;">
         ${TIERS.map(t => `<button class="btn-ghost" style="border-color:${cur.deepTier===t.id?'#14213A':'#D9DCD3'};background:${cur.deepTier===t.id?'#14213A0A':'#fff'};" onclick="cur_deepTier('${t.id}')">${t.label} · ${t.count}题</button>`).join("")}
       </div>
-      <div class="kpi-label">问题类型</div>
+      ${cur.deepTier !== 'quick' ? '<div class="hint">本轮只真实开发了「快速 · 20题」，标准/深度规模尚未开发。</div>' : ''}
+      <div class="kpi-label">问题类型（不选则按默认分布抽题，B2B高价值Query占较高比例，不会全部是C端消费者问题）</div>
       <div style="margin-bottom:16px;">
         ${cur.questionTypes.map(t => {
           const active = cur.deepCategories.has(t);
           return `<button class="btn-ghost" style="border-color:${active?'#0E8C7F':'#D9DCD3'};background:${active?'#0E8C7F14':'#fff'};color:${active?'#0E8C7F':'#6B6E64'};margin:2px;" onclick="toggleCategory('${t.replace(/'/g,"\\'")}')">${t}</button>`;
         }).join("")}
       </div>
-      <div class="kpi-label">选择AI平台（共${cur.platforms.length}个）</div>
+      <div class="kpi-label">选择AI平台（共${cur.platforms.length}个，本轮仅支持DeepSeek真实调用）</div>
       ${cur.platforms.map(p => `
         <div class="platform-row" style="opacity:${p.enabled?1:0.45}">
           <label><input type="checkbox" ${state.selectedDeep.has(p.id)?'checked':''} ${p.enabled?'':'disabled'} onchange="toggleSelected(state.selectedDeep,'${p.id}')" /> ${p.name}</label>
@@ -563,12 +990,23 @@ function renderDeep() {
         </div>
       `).join("")}
       <div style="height:6px;"></div>
-      <button class="btn" onclick="startDeep()">开始深度诊断</button>
+      <button class="btn" onclick="startDeep()" ${state.deepRunning ? "disabled" : ""}>${state.deepRunning ? "诊断中…" : "开始深度诊断"}</button>
     </div>
   `;
+
   if (state.deepMessages) {
-    html += `<div class="card"><h3>执行结果</h3>${state.deepMessages.map(m => `<div style="font-size:13px;padding:6px 0;border-top:1px solid #EFF0E9;">${m}</div>`).join("")}</div>`;
+    html += `<div class="card"><h3>提示</h3>${state.deepMessages.map(m => `<div style="font-size:13px;padding:6px 0;border-top:1px solid #EFF0E9;">${escapeHtml(m)}</div>`).join("")}</div>`;
   }
+
+  if (state.deepProgress && (state.deepRunning || !state.deepReport)) {
+    html += renderDeepProgress(state.deepProgress);
+  }
+
+  if (state.deepReport) {
+    html += `<div class="hint">诊断已完成，以下为20题真实批量结果的聚合分析（全部基于确定性规则，仅供参考，不构成完整GEO评分）。</div>`;
+    html += renderDeepReport(state.deepReport.run, state.deepReport.report, state.deepReport.items);
+  }
+
   return html;
 }
 function cur_deepTier(id) { d().deepTier = id; render(); }
@@ -636,6 +1074,31 @@ function emptyState(title, note) {
   return `<div class="card empty"><div class="title">${title}</div><div class="note">${note}</div></div>`;
 }
 
+function renderHistoryPage() {
+  if (state.historyDetail) {
+    return `
+      <button class="btn-ghost" onclick="closeHistoryDetail()">← 返回诊断历史列表</button>
+      <div style="height:12px;"></div>
+      ${renderDeepReport(state.historyDetail.run, state.historyDetail.report, state.historyDetail.items)}
+    `;
+  }
+  const runs = state.historyRuns;
+  if (runs === null) return `<div class="card"><div class="qa-meta">加载中…</div></div>`;
+  if (!runs.length) {
+    return emptyState("暂无诊断历史", "完成一次「深度诊断 · 20题」后，记录会自动保存在这里。");
+  }
+  return `<div class="card"><h3>诊断历史</h3>
+    ${runs.map(r => `
+      <div class="status-row" style="cursor:pointer;" onclick="openHistoryDetail(${r.id})">
+        <span>${escapeHtml(r.created_at)}　${r.market==='cn'?'中国市场':'海外市场'}　${escapeHtml(r.platform)}　${r.total_questions}题</span>
+        <span style="color:#6B6E64;font-size:12px;">
+          成功${r.success_count}　提及率${r.stats.brand_mention_rate!=null?r.stats.brand_mention_rate+'%':'--'}　推荐率${r.stats.recommend_rate!=null?r.stats.recommend_rate+'%':'--'}　Top3率${r.stats.top3_rate!=null?r.stats.top3_rate+'%':'--'}
+        </span>
+      </div>
+    `).join("")}
+  </div>`;
+}
+
 function renderSettings() {
   const cur = d();
   return `<div class="card"><h3>系统信息</h3>
@@ -662,7 +1125,7 @@ function render() {
     competitors: renderCompetitors,
     citations: () => emptyState("暂无引用来源数据","完成真实AI平台诊断后，将在此展示各平台回答中引用的来源站点及频次。"),
     content: () => emptyState("暂无爆款内容公式","需先在「引用来源」中积累被多平台引用的文章数据，才能提炼内容优化建议。"),
-    history: () => emptyState("暂无诊断历史","每次完成真实诊断后，记录会自动保存在这里。"),
+    history: renderHistoryPage,
     reports: () => emptyState("暂无可用报告","生成报告需要先完成至少一次真实AI平台诊断。"),
     platforms: renderPlatforms,
     settings: renderSettings,
@@ -673,6 +1136,7 @@ function render() {
 /* ---------------- 启动 ---------------- */
 render();
 checkDeepSeekStatus();
+loadDashboardLatest(); // 默认页就是 Dashboard，开机先拉一次最新深度诊断数据
 </script>
 </body>
 </html>

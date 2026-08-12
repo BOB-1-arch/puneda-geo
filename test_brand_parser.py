@@ -110,6 +110,17 @@ def test_generic_descriptive_sentence_not_extracted_as_competitor():
     assert "车载冰箱推荐以下" not in result["competitors"]
 
 
+def test_own_brand_followed_by_descriptive_suffix_not_extracted_as_competitor():
+    """回归测试：深度诊断批量测试中新发现的问题——本方品牌名紧跟"是一家...厂家/
+    品牌/车载冰箱"这类描述句式时，BRAND_SUFFIX_PATTERN 会把"普能达是一家"整体
+    误抽成竞品名。真实竞品名不可能包含本方品牌的字符串，因此按"包含"过滤。
+    """
+    result = parse_geo_answer("普能达是一家车载冰箱生产厂家，主要做OEM代工。", "deepseek-v4-flash")
+    assert result["brand_mentioned"] is True
+    assert result["competitors"] == []
+    assert "普能达是一家" not in result["competitors"]
+
+
 ALL_TESTS = [v for k, v in list(globals().items()) if k.startswith("test_")]
 
 
