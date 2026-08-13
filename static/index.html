@@ -99,6 +99,7 @@ const NAV_ITEMS = [
   { id: "dashboard", label: "Dashboard" },
   { id: "quick", label: "快速诊断" },
   { id: "deep", label: "深度诊断" },
+  { id: "tutorial", label: "GEO教程" },
   { id: "bank", label: "问题库" },
   { id: "competitors", label: "竞品分析" },
   { id: "citations", label: "引用来源" },
@@ -183,6 +184,7 @@ const state = {
   dashboardLatest: null,    // {run, report, items} | {run:null} 最新一次已完成的深度诊断
   historyRuns: null,        // 诊断历史列表
   historyDetail: null,      // 点开的某一次历史详情 {run, report, items}
+  tutorialData: null,       // {run, tutorial:{basics, personalized, has_diagnosis_data}}
 };
 // 默认全选所有平台
 state.selectedQuick = new Set(state.data.cn.platforms.map(p => p.id));
@@ -283,6 +285,12 @@ async function deepFetchLatest() {
   return res.json(); // { run, report, items }
 }
 
+async function fetchGeoTutorial() {
+  const res = await fetch(BACKEND_URL + "/api/tutorial/geo");
+  if (!res.ok) throw new Error("获取GEO教程失败（状态码 " + res.status + "）");
+  return res.json(); // { run, tutorial: {basics, personalized, has_diagnosis_data} }
+}
+
 async function loadDashboardLatest() {
   try {
     state.dashboardLatest = await deepFetchLatest();
@@ -313,6 +321,15 @@ async function openHistoryDetail(runId) {
 }
 function closeHistoryDetail() { state.historyDetail = null; render(); }
 
+async function loadTutorial() {
+  try {
+    state.tutorialData = await fetchGeoTutorial();
+  } catch (e) {
+    state.tutorialData = state.tutorialData || { run: null, tutorial: { basics: [], personalized: [], has_diagnosis_data: false } };
+  }
+  if (state.page === "tutorial") render();
+}
+
 /* ---------------- 交互逻辑 ---------------- */
 
 function setMarket(m) { state.market = m; state.quickResults = null; state.deepMessages = null; render(); }
@@ -320,6 +337,7 @@ function setPage(p) {
   state.page = p;
   if (p === "dashboard") loadDashboardLatest();
   if (p === "history") { state.historyDetail = null; loadHistoryList(); }
+  if (p === "tutorial") loadTutorial();
   render();
 }
 
@@ -1099,6 +1117,86 @@ function renderHistoryPage() {
   </div>`;
 }
 
+function renderTutorialBasicSection(section, idx) {
+  const panelId = "tutorial-basic-" + section.id;
+  return `
+    <div style="border-bottom:1px solid #EFF0E9;padding:10px 0;">
+      <a href="#" onclick="toggleInlinePanel('${panelId}');return false;" style="font-size:14px;color:#14213A;font-weight:600;">
+        ${escapeHtml(section.title)}
+      </a>
+      <div style="font-size:13px;color:#6B6E64;margin-top:4px;">${escapeHtml(section.summary)}</div>
+      <div id="${panelId}" style="display:${idx === 0 ? 'block' : 'none'};margin-top:10px;">
+        ${section.content.map(p => `<div style="font-size:13px;line-height:1.8;margin-bottom:10px;">${escapeHtml(p)}</div>`).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderTutorialPersonalizedCard(t, idx) {
+  const panelId = "tutorial-gap-questions-" + idx;
+  return `
+    <div style="border:1px solid #E4E6DE;border-radius:8px;padding:14px 16px;margin-bottom:12px;">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px;">
+        <span class="badge" style="background:#B23A2E10;color:#B23A2E;"><span class="d" style="background:#B23A2E;"></span>${escapeHtml(t.gap_label)}</span>
+        <span style="font-size:12px;color:#9A9C92;">命中 ${t.affected_count} 个问题</span>
+        <span class="type-tag" style="margin:0;">${escapeHtml(t.action_type)}</span>
+      </div>
+      <div style="font-size:15px;font-weight:600;margin-bottom:6px;">${escapeHtml(t.title)}</div>
+      <div style="font-size:13px;color:#6B6E64;margin-bottom:10px;">${escapeHtml(t.summary)}</div>
+
+      <div class="qa-meta" style="margin-top:0;">为什么会这样</div>
+      ${t.why.map(p => `<div style="font-size:13px;line-height:1.8;margin:4px 0 10px;">${escapeHtml(p)}</div>`).join("")}
+
+      <div class="qa-meta" style="margin-top:0;">具体怎么做</div>
+      <ul style="margin:6px 0 10px;padding-left:18px;">
+        ${t.how_to.map(step => `<li style="font-size:13px;line-height:1.8;margin-bottom:4px;">${escapeHtml(step)}</li>`).join("")}
+      </ul>
+
+      <div class="qa-meta" style="margin-top:0;">结合你的诊断结果</div>
+      <div style="font-size:13px;line-height:1.8;margin:4px 0 10px;">${escapeHtml(t.example)}</div>
+
+      <a href="#" onclick="toggleInlinePanel('${panelId}');return false;" style="font-size:12.5px;color:#6B6E64;">▼ 查看命中该问题的具体Query</a>
+      <div id="${panelId}" style="display:none;margin-top:6px;">
+        ${t.affected_questions.map(q => `<div style="font-size:12.5px;color:#6B6E64;padding:3px 0;">· ${escapeHtml(q)}</div>`).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderTutorial() {
+  const data = state.tutorialData;
+  if (!data) return `<div class="card"><div class="qa-meta">加载中…</div></div>`;
+
+  const tutorial = data.tutorial;
+  let html = `
+    <div class="card">
+      <h3>GEO基础知识</h3>
+      <div class="qa-meta" style="margin-top:0;">不依赖任何诊断数据，随时可以看——先搞清楚GEO到底在优化什么。</div>
+      ${tutorial.basics.map((s, i) => renderTutorialBasicSection(s, i)).join("")}
+    </div>
+  `;
+
+  html += `<div class="card"><h3>根据你的诊断结果，你应该重点关注</h3>`;
+  if (!tutorial.has_diagnosis_data) {
+    html += `
+      <div class="qa-meta" style="margin-top:0;">还没有已完成的深度诊断记录，跑一次「深度诊断 · 20题」后，
+      这里会按你实际命中的GEO问题，自动排出优先该看哪些教程。</div>
+      <div style="margin-top:10px;"><button class="btn" onclick="setPage('deep')">去跑深度诊断</button></div>
+    `;
+  } else if (!tutorial.personalized.length) {
+    html += `<div class="qa-meta" style="margin-top:0;">最近一次深度诊断没有识别出明确的GEO Gap，暂无针对性教程可推荐，可以先看上面的基础知识。</div>`;
+  } else {
+    html += `<div class="qa-meta" style="margin-top:0;">
+      数据来自最近一次已完成的深度诊断（完成时间：${escapeHtml(data.run.completed_at)}）。
+      下面按问题出现频次从高到低排序——排在最前面的，是你目前最值得优先解决的GEO问题。
+    </div>`;
+    html += `<div style="margin-top:12px;">${tutorial.personalized.map((t, i) => renderTutorialPersonalizedCard(t, i)).join("")}</div>`;
+  }
+  html += `</div>`;
+
+  return html;
+}
+
 function renderSettings() {
   const cur = d();
   return `<div class="card"><h3>系统信息</h3>
@@ -1129,6 +1227,7 @@ function render() {
 
   const routes = {
     dashboard: renderDashboard, quick: renderQuick, deep: renderDeep, bank: renderBank,
+    tutorial: renderTutorial,
     competitors: renderCompetitors,
     citations: () => emptyState("暂无引用来源数据","完成真实AI平台诊断后，将在此展示各平台回答中引用的来源站点及频次。"),
     content: () => emptyState("暂无爆款内容公式","需先在「引用来源」中积累被多平台引用的文章数据，才能提炼内容优化建议。"),
