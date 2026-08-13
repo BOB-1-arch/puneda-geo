@@ -170,6 +170,36 @@ def test_only_deepseek_platform_supported():
     assert r.status_code == 400
 
 
+# ---------------------------------------------------------------------------
+# GEO教程接口
+# ---------------------------------------------------------------------------
+
+def test_tutorial_endpoint_returns_only_basics_when_no_completed_run():
+    # 用一个全新的、不会和其它测试的market/platform组合冲突的过滤条件，
+    # 确保这里查到的确实是"没有已完成诊断"的状态。
+    r = client.get("/api/tutorial/geo", params={"market": "cn", "platform": "不存在的平台"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["run"] is None
+    assert data["tutorial"]["has_diagnosis_data"] is False
+    assert data["tutorial"]["personalized"] == []
+    assert len(data["tutorial"]["basics"]) > 0
+
+
+def test_tutorial_endpoint_returns_personalized_content_after_completed_run():
+    _run_full_batch()  # 全部20题成功，且brand_mentioned在(i%3==0)时为True，必然会产生真实Gap
+    r = client.get("/api/tutorial/geo", params={"market": "cn", "platform": "DeepSeek"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["run"] is not None
+    assert data["tutorial"]["has_diagnosis_data"] is True
+    assert len(data["tutorial"]["personalized"]) > 0
+    for p in data["tutorial"]["personalized"]:
+        assert p["affected_count"] > 0
+        assert len(p["affected_questions"]) > 0
+        assert p["how_to"]
+
+
 ALL_TESTS = [v for k, v in list(globals().items()) if k.startswith("test_")]
 
 if __name__ == "__main__":

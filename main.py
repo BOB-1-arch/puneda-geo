@@ -20,6 +20,7 @@ from diagnosis_analyzer import diagnose as run_geo_diagnosis
 from question_bank import select_questions
 import storage
 from aggregate import build_full_report, compute_run_stats
+from geo_tutorial import build_tutorial_report
 
 try:
     from dotenv import load_dotenv
@@ -269,6 +270,18 @@ def get_deep_diagnosis_run(run_id: int):
         raise HTTPException(status_code=404, detail="诊断任务不存在")
     items = storage.get_run_items(run_id)
     return {"run": run, "report": build_full_report(items), "items": items}
+
+
+@app.get("/api/tutorial/geo")
+def get_geo_tutorial(market: str | None = None, platform: str | None = None):
+    """GEO教程：基础知识始终返回；如果存在最近一次已完成的深度诊断，
+    额外按诊断结果里实际命中的Gap频次排序返回针对性教程。
+    """
+    run = storage.get_latest_successful_run(market=market, platform=platform)
+    if not run:
+        return {"run": None, "tutorial": build_tutorial_report(None)}
+    items = storage.get_run_items(run["id"])
+    return {"run": run, "tutorial": build_tutorial_report(items)}
 
 
 # 把 static/ 目录里的前端网页一并托管出去，浏览器访问 http://127.0.0.1:8000/ 即可打开。
