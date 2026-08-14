@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# 一键部署脚本：在一台全新的 Ubuntu/Debian 云服务器（用WebShell以root登录）上，
-# 装好依赖、拉代码、配置systemd服务并启动，让服务开机自启、崩溃自动重启。
+# 一键部署脚本：在一台全新的 Ubuntu/Debian 云服务器上，装好依赖、拉代码、
+# 配置systemd服务并启动，让服务开机自启、崩溃自动重启。
+# 不管网页终端默认登录的是 root（阿里云/腾讯云轻量应用服务器常见）还是
+# 普通用户+sudo权限（阿里云ECS的Workbench等常见），都能正常工作——
+# 不是root会自动用sudo重新拉起自己一次，不需要用户自己记得手动加sudo。
 #
 # 用法（在服务器的网页版终端里，两条命令）：
-#   curl -fsSL -o setup.sh https://raw.githubusercontent.com/bob-1-arch/puneda-geo/main/deploy/setup.sh
+#   curl -fsSL -o setup.sh https://raw.githubusercontent.com/BOB-1-arch/puneda-geo/main/deploy/setup.sh
 #   bash setup.sh sk-你的真实DeepSeekKey
 #
 # 重复运行是安全的：会拉最新代码、重建虚拟环境、重启服务，不会重复安装出问题。
@@ -18,12 +21,17 @@ if [ -z "$DEEPSEEK_API_KEY" ]; then
 fi
 
 if [ "$(id -u)" -ne 0 ]; then
-  echo "请用 root 用户运行（阿里云/腾讯云网页终端默认登录就是root）。"
-  exit 1
+  if command -v sudo >/dev/null 2>&1; then
+    echo "当前不是root用户，自动用sudo重新执行……"
+    exec sudo bash "$0" "$DEEPSEEK_API_KEY"
+  else
+    echo "当前不是root用户，且没有sudo命令，请切换到root后重新运行本脚本。"
+    exit 1
+  fi
 fi
 
 APP_DIR=/opt/puneda-geo
-REPO_URL=https://github.com/bob-1-arch/puneda-geo.git
+REPO_URL=https://github.com/BOB-1-arch/puneda-geo.git
 SERVICE_NAME=puneda-geo
 
 echo "==> [1/5] 安装系统依赖（python3 / git）"
