@@ -21,6 +21,7 @@ from question_bank import select_questions
 import storage
 from aggregate import build_full_report, compute_run_stats
 from geo_tutorial import build_tutorial_report
+import content_matrix as cm
 
 try:
     from dotenv import load_dotenv
@@ -300,6 +301,365 @@ def get_geo_tutorial(market: str | None = None, platform: str | None = None):
         return {"run": None, "tutorial": build_tutorial_report(None)}
     items = storage.get_run_items(run["id"])
     return {"run": run, "tutorial": build_tutorial_report(items)}
+
+
+# ---------------------------------------------------------------------------
+# GEO 内容矩阵
+#
+# 诊断 -> 发现未覆盖Query -> 加入内容矩阵 -> 聚合相似Query -> P1/P2/P3内容任务
+# -> 标题/大纲 -> 人工管理状态 -> 发布/收录记录 -> 设置复测 -> 重新诊断
+# -> baseline vs retest 这条完整链路。
+#
+# 复测同样不在后端直接调用DeepSeek：前端复用已有的 /api/ask/deepseek +
+# /api/diagnose/geo 逐个Query重新跑一遍（和深度诊断同一条真实链路），
+# 后端只负责把结果落库、和baseline做对比。
+# ---------------------------------------------------------------------------
+
+_VALID_CONTENT_CLUSTERS = {c for c, _ in cm.CONTENT_CLUSTERS}
+_VALID_CONTENT_TYPES = {c for c, _ in cm.CONTENT_TYPES}
+
+
+def _validate_enum(value, valid_set, field_name):
+    if value is not None and value not in valid_set:
+        raise HTTPException(status_code=400, detail=f"{field_name} 不合法：{value}，可选值：{sorted(valid_set)}")
+
+
+class EntityFactIn(BaseModel):
+    name: str
+    content: str = ""
+    source: str = ""
+    verified: bool = False
+
+
+class ContentTaskIn(BaseModel):
+    title: str
+    content_cluster: str
+    content_type: str
+    priority: str = "P3"
+    status: str = "planning"
+
+    target_query: str | None = None
+    target_queries: list[str] | None = None
+    query_intent: str | None = None
+    commercial_value: str | None = None
+
+    source_diagnosis_id: int | None = None
+    source_diagnosis_item_ids: list[int] | None = None
+
+    geo_gaps: list[str] | None = None
+    action_type: str | None = None
+    reason: str | None = None
+
+    suggested_title: str | None = None
+    alt_titles: list[str] | None = None
+    content_angle: str | None = None
+    outline: list[dict] | None = None
+    key_points: list[str] | None = None
+    facts_required: list[str] | None = None
+    entity_facts: list[EntityFactIn] | None = None
+
+    target_page_type: str | None = None
+
+    baseline_brand_mentioned: bool | None = None
+    baseline_recommended: bool | None = None
+    baseline_rank: int | None = None
+    baseline_snapshot: dict | None = None
+
+    notes: str | None = None
+
+    # 当命中"发现相似内容任务"时，前端可以传这个字段，改成"合并到现有任务"
+    # 而不是新建一条任务。
+    merge_into_task_id: int | None = None
+
+
+class ContentTaskUpdate(BaseModel):
+    title: str | None = None
+    content_cluster: str | None = None
+    content_type: str | None = None
+    priority: str | None = None
+    status: str | None = None
+    target_query: str | None = None
+    target_queries: list[str] | None = None
+    suggested_title: str | None = None
+    alt_titles: list[str] | None = None
+    content_angle: str | None = None
+    outline: list[dict] | None = None
+    key_points: list[str] | None = None
+    facts_required: list[str] | None = None
+    entity_facts: list[EntityFactIn] | None = None
+    target_page_type: str | None = None
+    target_url: str | None = None
+    published_url: str | None = None
+    published_at: str | None = None
+    completed_at: str | None = None
+    index_status: str | None = None
+    index_checked_at: str | None = None
+    index_notes: str | None = None
+    retest_status: str | None = None
+    retest_due_at: str | None = None
+    notes: str | None = None
+
+
+def _content_task_dict_for_create(payload: ContentTaskIn) -> dict:
+    d = payload.model_dump(exclude={"merge_into_task_id"}, exclude_none=True)
+    if payload.entity_facts is not None:
+        d["entity_facts"] = [f.model_dump() for f in payload.entity_facts]
+    if not d.get("target_queries") and d.get("target_query"):
+        d["target_queries"] = [d["target_query"]]
+    if not d.get("target_query") and d.get("target_queries"):
+        d["target_query"] = d["target_queries"][0]
+    return d
+
+
+@app.get("/api/content/meta")
+def get_content_meta():
+    """内容矩阵用到的固定枚举，前端筛选/表单下拉框统一从这里取，
+    避免前后端各自维护一份、后续改动漏改。
+    """
+    return {
+        "content_clusters": [{"code": c, "label": l} for c, l in cm.CONTENT_CLUSTERS],
+        "content_types": [{"code": c, "label": l} for c, l in cm.CONTENT_TYPES],
+        "statuses": [{"code": s, "label": cm.STATUS_LABELS_CN[s]} for s in cm.STATUS_VALUES],
+        "priorities": cm.PRIORITY_VALUES,
+        "index_statuses": [{"code": s, "label": cm.INDEX_STATUS_LABELS_CN[s]} for s in cm.INDEX_STATUS_VALUES],
+        "retest_statuses": [{"code": s, "label": cm.RETEST_STATUS_LABELS_CN[s]} for s in cm.RETEST_STATUS_VALUES],
+    }
+
+
+@app.get("/api/content/dashboard")
+def get_content_dashboard():
+    tasks = storage.list_content_tasks(limit=100000)
+    return cm.compute_content_dashboard(tasks)
+
+
+@app.get("/api/content/tasks")
+def list_content_tasks(
+    priority: str | None = None,
+    status: str | None = None,
+    content_cluster: str | None = None,
+    query_intent: str | None = None,
+    commercial_value: str | None = None,
+    geo_gap: str | None = None,
+    source_diagnosis_id: int | None = None,
+    retest_status: str | None = None,
+    search: str | None = None,
+):
+    tasks = storage.list_content_tasks(
+        priority=priority, status=status, content_cluster=content_cluster,
+        query_intent=query_intent, commercial_value=commercial_value,
+        geo_gap=geo_gap, source_diagnosis_id=source_diagnosis_id,
+        retest_status=retest_status, search=search,
+    )
+    return {"tasks": tasks}
+
+
+@app.post("/api/content/tasks")
+def create_content_task_endpoint(payload: ContentTaskIn):
+    _validate_enum(payload.content_cluster, _VALID_CONTENT_CLUSTERS, "content_cluster")
+    _validate_enum(payload.content_type, _VALID_CONTENT_TYPES, "content_type")
+    _validate_enum(payload.priority, set(cm.PRIORITY_VALUES), "priority")
+    _validate_enum(payload.status, set(cm.STATUS_VALUES), "status")
+
+    if payload.merge_into_task_id is not None:
+        existing = storage.get_content_task(payload.merge_into_task_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="要合并进去的内容任务不存在")
+        query_text = payload.target_query or (payload.target_queries[0] if payload.target_queries else None)
+        item_id = payload.source_diagnosis_item_ids[0] if payload.source_diagnosis_item_ids else None
+        storage.append_query_to_task(payload.merge_into_task_id, query_text, item_id)
+        return {"task": storage.get_content_task(payload.merge_into_task_id), "merged": True}
+
+    task_id = storage.create_content_task(_content_task_dict_for_create(payload))
+    return {"task": storage.get_content_task(task_id), "merged": False}
+
+
+@app.get("/api/content/tasks/{task_id}")
+def get_content_task_endpoint(task_id: int):
+    task = storage.get_content_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="内容任务不存在")
+    return {"task": task}
+
+
+@app.put("/api/content/tasks/{task_id}")
+def update_content_task_endpoint(task_id: int, payload: ContentTaskUpdate):
+    existing = storage.get_content_task(task_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="内容任务不存在")
+
+    _validate_enum(payload.content_cluster, _VALID_CONTENT_CLUSTERS, "content_cluster")
+    _validate_enum(payload.content_type, _VALID_CONTENT_TYPES, "content_type")
+    _validate_enum(payload.priority, set(cm.PRIORITY_VALUES), "priority")
+    _validate_enum(payload.status, set(cm.STATUS_VALUES), "status")
+    _validate_enum(payload.index_status, set(cm.INDEX_STATUS_VALUES), "index_status")
+    _validate_enum(payload.retest_status, set(cm.RETEST_STATUS_VALUES), "retest_status")
+
+    updates = payload.model_dump(exclude_none=True)
+    if payload.entity_facts is not None:
+        updates["entity_facts"] = [f.model_dump() for f in payload.entity_facts]
+    # 标记"已发布"时如果没传发布时间，自动记一下，避免用户忘填。
+    if updates.get("status") == "published" and not updates.get("published_at"):
+        updates["published_at"] = storage.now()
+    if updates.get("status") == "completed" and not updates.get("completed_at"):
+        updates["completed_at"] = storage.now()
+    if updates.get("index_status") == "indexed" and not updates.get("index_checked_at"):
+        updates["index_checked_at"] = storage.now()
+
+    storage.update_content_task(task_id, updates)
+    return {"task": storage.get_content_task(task_id)}
+
+
+@app.delete("/api/content/tasks/{task_id}")
+def delete_content_task_endpoint(task_id: int):
+    """只删内容任务本身，绝不触碰 diagnosis_runs/diagnosis_items —— 两张表之间
+    只是用 source_diagnosis_id/source_diagnosis_item_ids 记了个引用关系，
+    没有任何级联删除。"""
+    existing = storage.get_content_task(task_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="内容任务不存在")
+    storage.delete_content_task(task_id)
+    return {"ok": True}
+
+
+class AdHocDiagnosisItemIn(BaseModel):
+    """快速诊断不落库到 diagnosis_items 表，没有 diagnosis_id/diagnosis_item_id
+    可以引用——这里允许直接把一次快速诊断的 parsed+diagnosis 结果内联传进来，
+    复用同一套 build_task_suggestion 逻辑，不需要另起一套判断规则。
+    """
+    question: str
+    query_intent: str | None = None
+    commercial_value: str | None = None
+    brand_mentioned: bool | None = None
+    recommended: bool | None = None
+    rank: int | None = None
+    competitors: list[dict] | None = None
+    citations: list[str] | None = None
+    gaps: list[dict] | None = None
+    actions: list[dict] | None = None
+
+
+class SuggestFromDiagnosisRequest(BaseModel):
+    diagnosis_id: int | None = None
+    diagnosis_item_id: int | None = None
+    item: AdHocDiagnosisItemIn | None = None
+
+
+@app.post("/api/content/tasks/suggest-from-diagnosis")
+def suggest_from_diagnosis(req: SuggestFromDiagnosisRequest):
+    """"加入内容矩阵"预览接口：不落库，只返回建议内容 + 是否命中相似的已有任务，
+    供前端弹预览窗口，用户确认后再调用 POST /api/content/tasks（带上
+    source_diagnosis_id/source_diagnosis_item_ids）或者带 merge_into_task_id 合并。
+
+    支持两种输入：
+    1. diagnosis_id + diagnosis_item_id —— 来自深度诊断，已经落库的问题。
+    2. item —— 来自快速诊断的临时结果（快速诊断本身不落库），直接内联传结构化数据。
+    """
+    if req.item is not None:
+        item = req.item.model_dump()
+        item["id"] = None
+        run_id = None
+    elif req.diagnosis_id is not None and req.diagnosis_item_id is not None:
+        items = storage.get_run_items(req.diagnosis_id)
+        item = next((it for it in items if it["id"] == req.diagnosis_item_id), None)
+        if not item:
+            raise HTTPException(status_code=404, detail="诊断问题不存在")
+        run_id = req.diagnosis_id
+    else:
+        raise HTTPException(status_code=400, detail="必须提供 diagnosis_id+diagnosis_item_id，或者 item")
+
+    suggestion = cm.build_task_suggestion(item, run_id=run_id)
+    existing_tasks = storage.list_content_tasks(limit=100000)
+    similar = cm.find_similar_tasks(
+        suggestion["target_query"], suggestion["content_cluster"],
+        suggestion["query_intent"], existing_tasks,
+    )
+    return {"suggestion": suggestion, "similar_tasks": similar}
+
+
+class BatchSuggestRequest(BaseModel):
+    diagnosis_id: int
+
+
+@app.post("/api/content/tasks/batch-suggest-from-diagnosis")
+def batch_suggest_from_diagnosis(req: BatchSuggestRequest):
+    """"生成内容矩阵建议"：把一次深度诊断里相似的Query聚合成少量建议
+    （不是20题生成20篇），同样不落库，供前端勾选后调用 batch-from-diagnosis。
+    """
+    run = storage.get_run(req.diagnosis_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="诊断任务不存在")
+    items = storage.get_run_items(req.diagnosis_id)
+    suggestions = cm.cluster_diagnosis_items_into_suggestions(items, run_id=req.diagnosis_id)
+    return {"suggestions": suggestions}
+
+
+class BatchCreateRequest(BaseModel):
+    suggestions: list[dict]
+
+
+@app.post("/api/content/tasks/batch-from-diagnosis")
+def batch_create_from_diagnosis(req: BatchCreateRequest):
+    """用户在 batch-suggest 预览里勾选之后，批量真正创建内容任务。"""
+    created = []
+    for s in req.suggestions:
+        fields = {k: v for k, v in s.items() if k != "covered_query_count"}
+        _validate_enum(fields.get("content_cluster"), _VALID_CONTENT_CLUSTERS, "content_cluster")
+        _validate_enum(fields.get("content_type"), _VALID_CONTENT_TYPES, "content_type")
+        task_id = storage.create_content_task(fields)
+        created.append(storage.get_content_task(task_id))
+    return {"tasks": created, "created_count": len(created)}
+
+
+class RetestResultIn(BaseModel):
+    query: str
+    brand_mentioned: bool | None = None
+    recommended: bool | None = None
+    rank: int | None = None
+    competitors: list[dict] | None = None
+    citations: list[str] | None = None
+
+
+class RetestRequest(BaseModel):
+    results: list[RetestResultIn]
+
+
+@app.post("/api/content/tasks/{task_id}/retest")
+def save_content_task_retest(task_id: int, req: RetestRequest):
+    """复测结果落库：真正的DeepSeek调用 + brand_parser + diagnosis_analyzer
+    由前端逐个Query复用现有 /api/ask/deepseek + /api/diagnose/geo 完成，
+    这个接口只负责把汇总结果存下来、和baseline做对比。
+    """
+    task = storage.get_content_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="内容任务不存在")
+    if not req.results:
+        raise HTTPException(status_code=400, detail="复测结果不能为空")
+
+    retest_snapshot = {
+        "per_query": [r.model_dump() for r in req.results],
+    }
+    first = req.results[0]
+    storage.update_content_task(task_id, {
+        "retest_snapshot": retest_snapshot,
+        "retest_brand_mentioned": first.brand_mentioned,
+        "retest_recommended": first.recommended,
+        "retest_rank": first.rank,
+        "retest_completed_at": storage.now(),
+        "retest_status": "completed",
+        "status": "retested",
+    })
+    updated = storage.get_content_task(task_id)
+    comparison = cm.compare_baseline_retest(updated.get("baseline_snapshot"), retest_snapshot)
+    return {"task": updated, "comparison": comparison}
+
+
+@app.get("/api/content/tasks/{task_id}/comparison")
+def get_content_task_comparison(task_id: int):
+    task = storage.get_content_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="内容任务不存在")
+    comparison = cm.compare_baseline_retest(task.get("baseline_snapshot"), task.get("retest_snapshot"))
+    return {"comparison": comparison}
 
 
 # 把 static/ 目录里的前端网页一并托管出去，浏览器访问 http://127.0.0.1:8000/ 即可打开。
