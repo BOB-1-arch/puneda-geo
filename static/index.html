@@ -92,7 +92,10 @@
 
 <script>
 /* ---------------- 配置 ---------------- */
-const BACKEND_URL = "http://127.0.0.1:8000";
+// 留空表示"和当前页面同一个源"——本页面本身就是FastAPI用StaticFiles托管出来的，
+// 所以无论是本机 http://127.0.0.1:8000 还是部署后的公网域名，相对路径都能正确
+// 命中同一个后端，不需要跟着部署环境手动改这个值。
+const BACKEND_URL = "";
 
 /* ---------------- 数据 ---------------- */
 const NAV_ITEMS = [
@@ -560,7 +563,7 @@ function renderDashboard() {
   const connectedCount = cur.platforms.filter(p => p.status === "connected").length;
   let html = "";
   if (state.backendReachable === false) {
-    html += `<div class="banner-error">无法连接到后端服务 ${BACKEND_URL}，请确认已在 D:\\PUNEDA-GEO 目录下运行 <code>uvicorn main:app --reload --port 8000</code>。</div>`;
+    html += `<div class="banner-error">无法连接到后端服务，请确认服务正在运行（本机开发可运行 <code>uvicorn main:app --reload --port 8000</code>；已部署到云端的话请检查服务是否处于休眠/重启中）。</div>`;
   }
   html += `
     <div class="card">
@@ -1203,7 +1206,7 @@ function renderSettings() {
     <div style="font-size:13px;color:#6B6E64;line-height:1.9;">
       当前市场：${state.market==='cn'?'中国市场':'海外市场'}<br/>
       品牌：${cur.brand.name}　行业：${cur.brand.industry}　语言：${cur.brand.lang}<br/>
-      后端地址：${BACKEND_URL}（配置在本文件顶部 BACKEND_URL 常量中）<br/>
+      后端地址：${location.origin}（前端和后端同源部署，无需单独配置）<br/>
       平台连接状态请前往「平台管理」页面查看。
     </div>
   </div>`;
