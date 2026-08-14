@@ -20,6 +20,15 @@ if [ -z "$DEEPSEEK_API_KEY" ]; then
   exit 1
 fi
 
+# 手机端网页终端粘贴时，输入法有时会把英文/数字自动转成"全角"字符——肉眼看起来
+# 一样，但不是标准ASCII，会导致后面调用DeepSeek接口时构造HTTP请求头失败。
+# 在这里提前用纯ASCII校验拦一道，避免用户过了老半天才在运行时看到看不懂的报错。
+if printf '%s' "$DEEPSEEK_API_KEY" | LC_ALL=C grep -q '[^ -~]'; then
+  echo "错误：传入的Key里包含非ASCII字符（很可能是手机粘贴时被输入法转成了全角字符）。"
+  echo "请去DeepSeek开放平台重新复制一份Key，确认输入法处于英文/半角模式后再粘贴，重新运行本脚本。"
+  exit 1
+fi
+
 if [ "$(id -u)" -ne 0 ]; then
   if command -v sudo >/dev/null 2>&1; then
     echo "当前不是root用户，自动用sudo重新执行……"
