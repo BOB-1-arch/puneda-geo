@@ -75,6 +75,15 @@
     border-radius:8px; padding:10px 14px; font-size:13px; margin-bottom:16px;
   }
   .type-tag { font-size:12px; padding:5px 11px; border-radius:999px; background:#F5F6F1; color:#14213A; margin:3px; display:inline-block; }
+  .modal-overlay { position:fixed; inset:0; background:rgba(20,33,58,0.45); display:flex; align-items:flex-start; justify-content:center; padding:40px 20px; overflow-y:auto; z-index:1000; }
+  .modal-box { background:#fff; border-radius:12px; max-width:640px; width:100%; padding:22px; }
+  .modal-box h3 { margin-top:0; }
+  .kanban-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; align-items:start; overflow-x:auto; }
+  .kanban-col { background:#F5F6F1; border-radius:10px; padding:10px; min-height:60px; }
+  .kanban-col h4 { font-size:12px; margin:0 0 8px; color:#6B6E64; }
+  .kanban-card { background:#fff; border:1px solid #E4E6DE; border-radius:8px; padding:10px; margin-bottom:8px; font-size:12.5px; cursor:pointer; }
+  .form-row { margin-bottom:10px; }
+  .form-row label { display:block; font-size:12px; color:#6B6E64; margin-bottom:4px; }
 </style>
 </head>
 <body>
@@ -106,7 +115,7 @@ const NAV_ITEMS = [
   { id: "bank", label: "问题库" },
   { id: "competitors", label: "竞品分析" },
   { id: "citations", label: "引用来源" },
-  { id: "content", label: "内容优化" },
+  { id: "content", label: "GEO内容矩阵" },
   { id: "history", label: "诊断历史" },
   { id: "reports", label: "报告" },
   { id: "platforms", label: "平台管理" },
@@ -188,6 +197,21 @@ const state = {
   historyRuns: null,        // 诊断历史列表
   historyDetail: null,      // 点开的某一次历史详情 {run, report, items}
   tutorialData: null,       // {run, tutorial:{basics, personalized, has_diagnosis_data}}
+
+  // ---- GEO内容矩阵 ----
+  contentMeta: null,        // {content_clusters, content_types, statuses, priorities, index_statuses, retest_statuses}
+  contentDashboard: null,   // /api/content/dashboard 的返回
+  contentTasks: null,       // 当前筛选条件下的任务列表
+  contentFilters: {
+    priority: "", status: "", content_cluster: "", query_intent: "",
+    commercial_value: "", geo_gap: "", retest_status: "", search: "",
+  },
+  contentView: "list",      // "list" | "kanban"
+  contentTaskDetail: null,  // 当前打开的任务详情 {task}
+  contentPreview: null,     // "加入内容矩阵"预览弹窗状态 {suggestion, similar_tasks, editedFields}
+  contentBatch: null,       // "生成内容矩阵建议"批量弹窗状态 {diagnosisId, suggestions, selected:Set}
+  contentRetestRunning: false,
+  contentMessages: null,
 };
 // 默认全选所有平台
 state.selectedQuick = new Set(state.data.cn.platforms.map(p => p.id));
@@ -294,6 +318,95 @@ async function fetchGeoTutorial() {
   return res.json(); // { run, tutorial: {basics, personalized, has_diagnosis_data} }
 }
 
+/* ---------------- GEO内容矩阵：与后端通信 ---------------- */
+
+async function contentFetchMeta() {
+  const res = await fetch(BACKEND_URL + "/api/content/meta");
+  if (!res.ok) throw new Error("获取内容矩阵配置失败（状态码 " + res.status + "）");
+  return res.json();
+}
+
+async function contentFetchDashboard() {
+  const res = await fetch(BACKEND_URL + "/api/content/dashboard");
+  if (!res.ok) throw new Error("获取内容矩阵Dashboard失败（状态码 " + res.status + "）");
+  return res.json();
+}
+
+async function contentFetchTasks(filters) {
+  const params = new URLSearchParams();
+  Object.entries(filters || {}).forEach(([k, v]) => { if (v) params.set(k, v); });
+  const qs = params.toString();
+  const res = await fetch(BACKEND_URL + "/api/content/tasks" + (qs ? "?" + qs : ""));
+  if (!res.ok) throw new Error("获取内容任务列表失败（状态码 " + res.status + "）");
+  return res.json();
+}
+
+async function contentFetchTask(taskId) {
+  const res = await fetch(BACKEND_URL + "/api/content/tasks/" + taskId);
+  if (!res.ok) throw new Error("获取内容任务详情失败（状态码 " + res.status + "）");
+  return res.json();
+}
+
+async function contentFetchComparison(taskId) {
+  const res = await fetch(BACKEND_URL + "/api/content/tasks/" + taskId + "/comparison");
+  if (!res.ok) throw new Error("获取复测对比失败（状态码 " + res.status + "）");
+  return res.json();
+}
+
+async function contentCreateTask(payload) {
+  const res = await fetch(BACKEND_URL + "/api/content/tasks", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+  });
+  if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.detail || "创建内容任务失败（状态码 " + res.status + "）"); }
+  return res.json();
+}
+
+async function contentUpdateTask(taskId, payload) {
+  const res = await fetch(BACKEND_URL + "/api/content/tasks/" + taskId, {
+    method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+  });
+  if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.detail || "更新内容任务失败（状态码 " + res.status + "）"); }
+  return res.json();
+}
+
+async function contentDeleteTask(taskId) {
+  const res = await fetch(BACKEND_URL + "/api/content/tasks/" + taskId, { method: "DELETE" });
+  if (!res.ok) throw new Error("删除内容任务失败（状态码 " + res.status + "）");
+  return res.json();
+}
+
+async function contentSuggestFromDiagnosis(payload) {
+  const res = await fetch(BACKEND_URL + "/api/content/tasks/suggest-from-diagnosis", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+  });
+  if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.detail || "生成内容任务建议失败（状态码 " + res.status + "）"); }
+  return res.json();
+}
+
+async function contentBatchSuggest(diagnosisId) {
+  const res = await fetch(BACKEND_URL + "/api/content/tasks/batch-suggest-from-diagnosis", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ diagnosis_id: diagnosisId }),
+  });
+  if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.detail || "生成内容矩阵建议失败（状态码 " + res.status + "）"); }
+  return res.json();
+}
+
+async function contentBatchCreate(suggestions) {
+  const res = await fetch(BACKEND_URL + "/api/content/tasks/batch-from-diagnosis", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ suggestions }),
+  });
+  if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.detail || "批量创建内容任务失败（状态码 " + res.status + "）"); }
+  return res.json();
+}
+
+async function contentRetest(taskId, results) {
+  const res = await fetch(BACKEND_URL + "/api/content/tasks/" + taskId + "/retest", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ results }),
+  });
+  if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.detail || "保存复测结果失败（状态码 " + res.status + "）"); }
+  return res.json();
+}
+
 async function loadDashboardLatest() {
   try {
     state.dashboardLatest = await deepFetchLatest();
@@ -333,6 +446,211 @@ async function loadTutorial() {
   if (state.page === "tutorial") render();
 }
 
+/* ---------------- GEO内容矩阵：交互逻辑 ---------------- */
+
+async function loadContentMatrix() {
+  try {
+    if (!state.contentMeta) state.contentMeta = await contentFetchMeta();
+    state.contentDashboard = await contentFetchDashboard();
+    const data = await contentFetchTasks(state.contentFilters);
+    state.contentTasks = data.tasks;
+  } catch (e) {
+    state.contentMessages = ["加载GEO内容矩阵数据失败 — " + e.message];
+  }
+  if (state.page === "content") render();
+}
+
+function contentMetaLabel(kind, code) {
+  if (!code) return "-";
+  const meta = state.contentMeta;
+  if (!meta) return code;
+  const map = {
+    cluster: meta.content_clusters, type: meta.content_types, status: meta.statuses,
+    index_status: meta.index_statuses, retest_status: meta.retest_statuses,
+  };
+  const list = map[kind];
+  const found = list && list.find(x => x.code === code);
+  return found ? found.label : code;
+}
+
+function setContentFilter(field, value) {
+  state.contentFilters[field] = value;
+  loadContentMatrix();
+}
+function resetContentFilters() {
+  state.contentFilters = { priority: "", status: "", content_cluster: "", query_intent: "", commercial_value: "", geo_gap: "", retest_status: "", search: "", source_diagnosis_id: "" };
+  loadContentMatrix();
+}
+function setContentView(v) { state.contentView = v; render(); }
+
+function viewContentTasksForDiagnosis(runId) {
+  state.contentFilters = { priority: "", status: "", content_cluster: "", query_intent: "", commercial_value: "", geo_gap: "", retest_status: "", search: "" };
+  state.contentFilters.source_diagnosis_id = runId;
+  state.contentTaskDetail = null;
+  setPage("content");
+}
+
+async function openContentTaskDetail(taskId) {
+  try {
+    const data = await contentFetchTask(taskId);
+    state.contentTaskDetail = { task: data.task, comparison: null };
+    try {
+      const cmp = await contentFetchComparison(taskId);
+      state.contentTaskDetail.comparison = cmp.comparison;
+    } catch (e) { /* 对比信息拉取失败不影响详情页其它内容展示 */ }
+  } catch (e) {
+    state.contentMessages = ["加载内容任务详情失败 — " + e.message];
+  }
+  render();
+}
+function closeContentTaskDetail() { state.contentTaskDetail = null; loadContentMatrix(); render(); }
+
+async function updateContentTaskField(taskId, fields) {
+  try {
+    const res = await contentUpdateTask(taskId, fields);
+    if (state.contentTaskDetail && state.contentTaskDetail.task.id === taskId) {
+      state.contentTaskDetail.task = res.task;
+    }
+  } catch (e) {
+    state.contentMessages = ["更新内容任务失败 — " + e.message];
+  }
+  render();
+}
+
+async function deleteContentTaskConfirm(taskId) {
+  if (!confirm("确定要删除这条内容任务吗？不会影响原始诊断记录。")) return;
+  try {
+    await contentDeleteTask(taskId);
+    state.contentTaskDetail = null;
+    await loadContentMatrix();
+  } catch (e) {
+    state.contentMessages = ["删除内容任务失败 — " + e.message];
+  }
+  render();
+}
+
+// ---- "加入内容矩阵"预览弹窗 ----
+
+async function openContentPreviewFromDeepItem(diagnosisId, diagnosisItemId) {
+  try {
+    const res = await contentSuggestFromDiagnosis({ diagnosis_id: diagnosisId, diagnosis_item_id: diagnosisItemId });
+    state.contentPreview = { suggestion: res.suggestion, similar_tasks: res.similar_tasks, mergeTargetId: null };
+  } catch (e) {
+    state.contentMessages = ["生成内容任务建议失败 — " + e.message];
+  }
+  render();
+}
+
+async function openContentPreviewFromQuickDiagnosis(question, parsed, diagnosis) {
+  const item = {
+    question, query_intent: diagnosis.query_intent, commercial_value: null,
+    brand_mentioned: parsed.brand_mentioned, recommended: parsed.recommended, rank: parsed.rank,
+    competitors: parsed.competitors, citations: parsed.citations,
+    gaps: diagnosis.gaps, actions: diagnosis.action_items,
+  };
+  try {
+    const res = await contentSuggestFromDiagnosis({ item });
+    state.contentPreview = { suggestion: res.suggestion, similar_tasks: res.similar_tasks, mergeTargetId: null };
+  } catch (e) {
+    state.contentMessages = ["生成内容任务建议失败 — " + e.message];
+  }
+  render();
+}
+
+function closeContentPreview() { state.contentPreview = null; render(); }
+function setContentPreviewMerge(taskId) {
+  state.contentPreview.mergeTargetId = taskId ? Number(taskId) : null;
+  render();
+}
+function editContentPreviewField(field, value) {
+  state.contentPreview.suggestion[field] = value;
+}
+
+async function confirmContentPreview() {
+  const p = state.contentPreview;
+  if (!p) return;
+  const payload = { ...p.suggestion };
+  if (p.mergeTargetId) payload.merge_into_task_id = p.mergeTargetId;
+  try {
+    await contentCreateTask(payload);
+    state.contentPreview = null;
+    await loadContentMatrix();
+  } catch (e) {
+    state.contentMessages = ["创建内容任务失败 — " + e.message];
+  }
+  render();
+}
+
+// ---- "生成内容矩阵建议"批量弹窗（深度诊断 -> 聚合建议 -> 勾选批量创建） ----
+
+async function openBatchSuggestModal(diagnosisId) {
+  try {
+    const res = await contentBatchSuggest(diagnosisId);
+    state.contentBatch = { diagnosisId, suggestions: res.suggestions, selected: new Set(res.suggestions.map((_, i) => i)) };
+  } catch (e) {
+    state.contentMessages = ["生成内容矩阵建议失败 — " + e.message];
+  }
+  render();
+}
+function closeBatchSuggestModal() { state.contentBatch = null; render(); }
+function toggleBatchSuggestSelected(i) {
+  const s = state.contentBatch.selected;
+  s.has(i) ? s.delete(i) : s.add(i);
+  render();
+}
+async function confirmBatchSuggest() {
+  const b = state.contentBatch;
+  if (!b) return;
+  const chosen = b.suggestions.filter((_, i) => b.selected.has(i));
+  if (!chosen.length) return;
+  try {
+    await contentBatchCreate(chosen);
+    state.contentBatch = null;
+    await loadContentMatrix();
+  } catch (e) {
+    state.contentMessages = ["批量创建内容任务失败 — " + e.message];
+  }
+  render();
+}
+
+// ---- 一键复测：真实复用 /api/ask/deepseek + /api/diagnose/geo，逐个Query跑一遍 ----
+
+async function runContentTaskRetest(taskId) {
+  const task = state.contentTaskDetail.task;
+  const queries = (task.target_queries && task.target_queries.length) ? task.target_queries : [task.target_query];
+  state.contentRetestRunning = true;
+  render();
+
+  const results = [];
+  for (const q of queries) {
+    try {
+      const askData = await askDeepSeek(q);
+      const diagResult = await diagnoseGeo(q, askData.raw_answer, askData.model);
+      results.push({
+        query: q,
+        brand_mentioned: diagResult.parsed.brand_mentioned,
+        recommended: diagResult.parsed.recommended,
+        rank: diagResult.parsed.rank,
+        competitors: diagResult.parsed.competitors,
+        citations: diagResult.parsed.citations,
+      });
+    } catch (e) {
+      results.push({ query: q, brand_mentioned: null, recommended: null, rank: null, competitors: [], citations: [] });
+    }
+  }
+
+  try {
+    const res = await contentRetest(taskId, results);
+    state.contentTaskDetail = { task: res.task, comparison: res.comparison };
+    state.contentMessages = null;
+  } catch (e) {
+    state.contentMessages = ["复测失败 — " + e.message];
+  }
+  state.contentRetestRunning = false;
+  await loadContentMatrix();
+  render();
+}
+
 /* ---------------- 交互逻辑 ---------------- */
 
 function setMarket(m) { state.market = m; state.quickResults = null; state.deepMessages = null; render(); }
@@ -341,6 +659,7 @@ function setPage(p) {
   if (p === "dashboard") loadDashboardLatest();
   if (p === "history") { state.historyDetail = null; loadHistoryList(); }
   if (p === "tutorial") loadTutorial();
+  if (p === "content") { state.contentTaskDetail = null; loadContentMatrix(); }
   render();
 }
 
@@ -723,7 +1042,7 @@ function renderGapEvidence(gaps) {
   `).join("");
 }
 
-function renderDiagnosisBlock(entry) {
+function renderDiagnosisBlock(entry, qIndex) {
   if (entry.parseError) {
     return `<div class="qa-meta" style="color:#B23A2E;">GEO诊断分析失败 — ${escapeHtml(entry.parseError)}</div>`;
   }
@@ -740,9 +1059,19 @@ function renderDiagnosisBlock(entry) {
     <div style="font-size:13px;line-height:1.7;">${escapeHtml(diag.diagnosis_summary)}</div>
     ${sectionHeader("改善建议")}
     ${renderActionItems(diag.action_items)}
+    <div style="margin-top:8px;">
+      <button class="btn-ghost" onclick="openContentPreviewFromQuickResult(${qIndex}, '${entry.platform.id}')">+ 加入内容矩阵</button>
+    </div>
     ${sectionHeader("证据")}
     ${renderGapEvidence(diag.gaps)}
   `;
+}
+
+function openContentPreviewFromQuickResult(qIndex, platformId) {
+  const question = state.quickResults && state.quickResults.questions[qIndex];
+  const entry = findQuickEntry(qIndex, platformId);
+  if (!question || !entry || !entry.parsed || !entry.diagnosis) return;
+  openContentPreviewFromQuickDiagnosis(question, entry.parsed, entry.diagnosis);
 }
 
 function renderRawAnswerToggle(qIndex, entry) {
@@ -800,7 +1129,7 @@ function renderQuick() {
             <div class="qa-block">
               <div><b>${entry.platform.name}</b> ${badge("connected")}</div>
               <div class="qa-meta">模型：${entry.model}　诊断时间：${entry.time}</div>
-              ${renderDiagnosisBlock(entry)}
+              ${renderDiagnosisBlock(entry, qIndex)}
               ${renderRawAnswerToggle(qIndex, entry)}
             </div>`;
         }
@@ -923,6 +1252,9 @@ function renderDeepItemCard(it, idx) {
       <div class="qa-meta" style="margin-top:0;">GEO Gap：${gapLabels}</div>
       <div style="font-size:13px;margin-top:6px;line-height:1.6;">${escapeHtml(it.diagnosis_summary || "")}</div>
       ${(it.actions && it.actions.length) ? `<div style="margin-top:6px;">${renderActionItems(it.actions)}</div>` : ""}
+      <div style="margin-top:8px;">
+        <button class="btn-ghost" onclick="openContentPreviewFromDeepItem(${it.diagnosis_id}, ${it.id})">+ 加入内容矩阵</button>
+      </div>
       <a href="#" onclick="toggleInlinePanel('${rawId}');return false;" style="font-size:12px;color:#6B6E64;display:inline-block;margin-top:6px;">▼ 查看原始回答</a>
       <div id="${rawId}" style="display:none;margin-top:6px;white-space:pre-wrap;font-size:12.5px;background:#F5F6F1;border-radius:8px;padding:8px 10px;">${escapeHtml(it.raw_answer || "")}</div>
     </div>
@@ -976,6 +1308,12 @@ function renderDeepReport(run, report, items) {
       ${kpi("Citation Rate", s.citation_rate != null ? s.citation_rate + "%" : "--")}
     </div>
   `;
+  html += `<div class="card">
+    <h3>GEO内容矩阵</h3>
+    <div class="qa-meta" style="margin-top:0;">把这次诊断里相似的未覆盖Query自动聚合成少量内容任务建议（不是逐题生成），勾选后批量加入内容矩阵。</div>
+    <div style="margin-top:10px;"><button class="btn" onclick="openBatchSuggestModal(${run.id})">生成内容矩阵建议</button>
+    <button class="btn-ghost" onclick="viewContentTasksForDiagnosis(${run.id})" style="margin-left:8px;">查看本次生成的内容任务</button></div>
+  </div>`;
   html += renderHighValueSection(report.high_value);
   html += renderGapsTopSection(report.gaps_top);
   html += renderCompetitorsTopSection(report.competitors_top);
@@ -1200,6 +1538,420 @@ function renderTutorial() {
   return html;
 }
 
+/* ---------------- GEO内容矩阵：渲染 ---------------- */
+
+function contentPriorityBadge(p) {
+  const colors = { P1: "#B23A2E", P2: "#C78607", P3: "#6B6E64" };
+  const c = colors[p] || "#6B6E64";
+  return `<span class="badge" style="background:${c}10;color:${c};"><span class="d" style="background:${c};"></span>${escapeHtml(p || "-")}</span>`;
+}
+
+function renderContentDashboardCards() {
+  const dash = state.contentDashboard;
+  if (!dash) return `<div class="card"><div class="qa-meta">加载中…</div></div>`;
+  const kpi = (label, value) => `<div class="kpi-card"><div class="kpi-label">${label}</div><div class="kpi-value" style="color:#14213A;">${value}</div></div>`;
+  let html = `
+    <div class="kpi-grid">
+      ${kpi("总内容任务", dash.total_tasks)}
+      ${kpi("P1任务", dash.p1_count)}
+      ${kpi("P2任务", dash.p2_count)}
+      ${kpi("P3任务", dash.p3_count)}
+      ${kpi("来源于深度诊断", dash.from_diagnosis_count)}
+      ${kpi("待复测", dash.waiting_retest_count)}
+    </div>
+    <div class="card"><h3>任务状态分布</h3>
+      ${STATUS_ORDER_FOR_DASHBOARD.map(s => `<div class="status-row"><span>${contentMetaLabel("status", s)}</span><span style="color:#6B6E64;">${dash.status_counts[s] || 0}</span></div>`).join("")}
+    </div>
+    <div class="card"><h3>来自诊断的Gap覆盖情况</h3>
+      <div class="status-row"><span>影响High Value Query数量</span><span style="color:#6B6E64;">${dash.high_value_query_count}</span></div>
+      <div class="status-row"><span>对应 BRAND_ABSENCE 数量</span><span style="color:#6B6E64;">${dash.brand_absence_count}</span></div>
+      <div class="status-row"><span>对应 CITATION_GAP 数量</span><span style="color:#6B6E64;">${dash.citation_gap_count}</span></div>
+      <div class="status-row"><span>对应 MANUFACTURER_IDENTITY_GAP 数量</span><span style="color:#6B6E64;">${dash.manufacturer_identity_gap_count}</span></div>
+    </div>
+  `;
+  return html;
+}
+const STATUS_ORDER_FOR_DASHBOARD = ["planning","writing","review","completed","published","waiting_index","indexed","waiting_retest","retested","archived"];
+
+function renderContentFiltersBar() {
+  const meta = state.contentMeta;
+  const f = state.contentFilters;
+  const opt = (list, value, labelKey) => (list || []).map(x =>
+    `<option value="${x.code}" ${value === x.code ? "selected" : ""}>${escapeHtml(x.label)}</option>`
+  ).join("");
+
+  return `
+    <div class="card">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+        <select style="width:auto;" onchange="setContentFilter('priority', this.value)">
+          <option value="">全部优先级</option>
+          ${(meta ? meta.priorities : []).map(p => `<option value="${p}" ${f.priority===p?"selected":""}>${p}</option>`).join("")}
+        </select>
+        <select style="width:auto;" onchange="setContentFilter('status', this.value)">
+          <option value="">全部状态</option>
+          ${opt(meta && meta.statuses, f.status)}
+        </select>
+        <select style="width:auto;" onchange="setContentFilter('content_cluster', this.value)">
+          <option value="">全部内容集群</option>
+          ${opt(meta && meta.content_clusters, f.content_cluster)}
+        </select>
+        <select style="width:auto;" onchange="setContentFilter('commercial_value', this.value)">
+          <option value="">全部商业价值</option>
+          <option value="high" ${f.commercial_value==="high"?"selected":""}>高</option>
+          <option value="medium" ${f.commercial_value==="medium"?"selected":""}>中</option>
+          <option value="low" ${f.commercial_value==="low"?"selected":""}>低</option>
+        </select>
+        <select style="width:auto;" onchange="setContentFilter('retest_status', this.value)">
+          <option value="">全部复测状态</option>
+          ${opt(meta && meta.retest_statuses, f.retest_status)}
+        </select>
+        <input type="text" style="width:200px;" placeholder="搜索标题 / Query" value="${escapeHtml(f.search || "")}"
+          onchange="setContentFilter('search', this.value)" />
+        <button class="btn-ghost" onclick="resetContentFilters()">清空筛选</button>
+        <span style="flex:1;"></span>
+        <button class="btn-ghost" style="${state.contentView==='list'?'border-color:#14213A;':''}" onclick="setContentView('list')">列表视图</button>
+        <button class="btn-ghost" style="${state.contentView==='kanban'?'border-color:#14213A;':''}" onclick="setContentView('kanban')">看板视图</button>
+      </div>
+      ${f.source_diagnosis_id ? `<div class="hint" style="margin:10px 0 0;">只看来源诊断 #${f.source_diagnosis_id} 生成的任务 —— <a href="#" onclick="setContentFilter('source_diagnosis_id','');return false;">清除此筛选</a></div>` : ""}
+    </div>
+  `;
+}
+
+function renderContentTaskListView(tasks) {
+  if (!tasks.length) return `<div class="card"><div class="qa-meta">没有符合筛选条件的内容任务。</div></div>`;
+  return `<div class="card">
+    ${tasks.map(t => `
+      <div class="status-row content-task-row" style="cursor:pointer;align-items:flex-start;" onclick="openContentTaskDetail(${t.id})">
+        <span style="display:flex;flex-direction:column;gap:4px;">
+          <span>${contentPriorityBadge(t.priority)} <b>${escapeHtml(t.title)}</b></span>
+          <span style="font-size:12px;color:#9A9C92;">
+            ${escapeHtml(contentMetaLabel("cluster", t.content_cluster))}
+            关联Query：${(t.target_queries||[]).length || (t.target_query?1:0)}
+            对应Gap：${(t.geo_gaps||[]).map(g=>escapeHtml(g)).join("、") || "无"}
+          </span>
+        </span>
+        <span style="text-align:right;font-size:12px;color:#6B6E64;">
+          ${contentMetaLabel("status", t.status)}<br/>
+          收录：${contentMetaLabel("index_status", t.index_status)}　复测：${contentMetaLabel("retest_status", t.retest_status)}
+        </span>
+      </div>
+    `).join("")}
+  </div>`;
+}
+
+function renderContentTaskKanbanView(tasks) {
+  const columns = STATUS_ORDER_FOR_DASHBOARD;
+  return `<div class="kanban-grid">
+    ${columns.map(status => {
+      const colTasks = tasks.filter(t => t.status === status);
+      return `<div class="kanban-col">
+        <h4>${contentMetaLabel("status", status)}（${colTasks.length}）</h4>
+        ${colTasks.map(t => `
+          <div class="kanban-card" onclick="openContentTaskDetail(${t.id})">
+            ${contentPriorityBadge(t.priority)}
+            <div style="margin-top:4px;font-weight:600;">${escapeHtml(t.title)}</div>
+            <div style="color:#9A9C92;margin-top:2px;">${escapeHtml(contentMetaLabel("cluster", t.content_cluster))}</div>
+          </div>
+        `).join("") || `<div style="font-size:12px;color:#C7C9BF;">无</div>`}
+      </div>`;
+    }).join("")}
+  </div>`;
+}
+
+function renderContentOutline(outline) {
+  if (!outline || !outline.length) return `<div class="qa-meta">暂无大纲</div>`;
+  return outline.map(sec => {
+    const indent = sec.level === "H1" ? 0 : sec.level === "H2" ? 16 : 32;
+    const size = sec.level === "H1" ? 14 : 13;
+    const weight = sec.level === "H1" ? 700 : sec.level === "H2" ? 600 : 400;
+    return `<div style="padding:4px 0;margin-left:${indent}px;font-size:${size}px;font-weight:${weight};">
+      <span style="color:#9A9C92;font-size:11px;margin-right:6px;">${sec.level}</span>${escapeHtml(sec.text)}
+    </div>`;
+  }).join("");
+}
+
+function renderContentEntityFacts(task) {
+  const facts = task.entity_facts || [];
+  return `
+    <div class="qa-meta" style="margin-top:0;">需要核实的企业事实</div>
+    <div style="margin:4px 0 10px;">
+      ${(task.facts_required || []).length
+        ? task.facts_required.map(f => {
+            const existing = facts.find(x => x.name === f);
+            const status = existing && existing.verified ? "已验证" : (existing && existing.content ? "待验证" : "待人工补充/核实");
+            const color = existing && existing.verified ? "#0E8C7F" : "#C78607";
+            return `<div style="font-size:13px;padding:5px 0;border-bottom:1px solid #EFF0E9;display:flex;justify-content:space-between;">
+              <span>${escapeHtml(f)}${existing && existing.content ? "：" + escapeHtml(existing.content) : ""}</span>
+              <span style="color:${color};font-size:12px;">【${status}】</span>
+            </div>`;
+          }).join("")
+        : `<div class="qa-meta">该内容集群暂无需要特别核实的事实条目。</div>`}
+    </div>
+    <div class="qa-meta" style="margin-top:0;">补充/编辑企业事实素材</div>
+    <div style="display:flex;gap:6px;margin:6px 0;">
+      <input type="text" id="fact-name-${task.id}" placeholder="事实名称，如：工厂面积" style="flex:1;" />
+      <input type="text" id="fact-content-${task.id}" placeholder="事实内容" style="flex:1;" />
+      <input type="text" id="fact-source-${task.id}" placeholder="来源" style="flex:1;" />
+      <button class="btn-ghost" onclick="addEntityFact(${task.id})">保存</button>
+    </div>
+  `;
+}
+
+function addEntityFact(taskId) {
+  const name = document.getElementById(`fact-name-${taskId}`).value.trim();
+  const content = document.getElementById(`fact-content-${taskId}`).value.trim();
+  const source = document.getElementById(`fact-source-${taskId}`).value.trim();
+  if (!name) return;
+  const task = state.contentTaskDetail.task;
+  const facts = (task.entity_facts || []).filter(f => f.name !== name);
+  facts.push({ name, content, source, verified: !!content });
+  updateContentTaskField(taskId, { entity_facts: facts });
+}
+
+function renderContentTaskDetailView(task, comparison) {
+  const queries = (task.target_queries && task.target_queries.length) ? task.target_queries : (task.target_query ? [task.target_query] : []);
+  const baselinePerQuery = (task.baseline_snapshot && task.baseline_snapshot.per_query) || [];
+  const retestPerQuery = (task.retest_snapshot && task.retest_snapshot.per_query) || [];
+
+  let html = `<button class="btn-ghost" onclick="closeContentTaskDetail()">← 返回内容矩阵</button><div style="height:12px;"></div>`;
+
+  html += `<div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;">
+      <div>
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px;">${contentPriorityBadge(task.priority)}<h3 style="margin:0;">${escapeHtml(task.title)}</h3></div>
+        <div class="qa-meta" style="margin-top:0;">
+          ${escapeHtml(contentMetaLabel("cluster", task.content_cluster))}　${escapeHtml(contentMetaLabel("type", task.content_type))}
+          　Query Intent：${escapeHtml(INTENT_LABELS_CN[task.query_intent] || task.query_intent || "-")}
+          　商业价值：${escapeHtml(task.commercial_value || "-")}
+        </div>
+      </div>
+      <button class="btn-ghost" onclick="deleteContentTaskConfirm(${task.id})" style="color:#B23A2E;">删除任务</button>
+    </div>
+
+    ${sectionHeader("基本信息")}
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+      <span class="qa-meta" style="margin:0;">优先级</span>
+      <select style="width:auto;" onchange="updateContentTaskField(${task.id}, {priority: this.value})">
+        ${(state.contentMeta ? state.contentMeta.priorities : ["P1","P2","P3"]).map(p => `<option value="${p}" ${task.priority===p?"selected":""}>${p}</option>`).join("")}
+      </select>
+      <span class="qa-meta" style="margin:0;">状态</span>
+      <select style="width:auto;" onchange="updateContentTaskField(${task.id}, {status: this.value})">
+        ${(state.contentMeta ? state.contentMeta.statuses : []).map(s => `<option value="${s.code}" ${task.status===s.code?"selected":""}>${escapeHtml(s.label)}</option>`).join("")}
+      </select>
+    </div>
+    <div class="qa-meta" style="margin-top:10px;">关联Query（${queries.length}）</div>
+    ${queries.map(q => `<div style="font-size:13px;padding:4px 0;border-bottom:1px solid #EFF0E9;">· ${escapeHtml(q)}</div>`).join("") || `<div class="qa-meta">无</div>`}
+    <div class="qa-meta" style="margin-top:10px;">对应GEO Gap</div>
+    <div>${(task.geo_gaps||[]).map(g => `<span class="type-tag">${escapeHtml(g)}</span>`).join("") || `<span class="qa-meta">无</span>`}</div>
+    ${task.reason ? `<div class="qa-meta" style="margin-top:8px;">原因：${escapeHtml(task.reason)}</div>` : ""}
+    ${task.source_diagnosis_id ? `<div style="margin-top:10px;"><a href="#" onclick="openHistoryDetail(${task.source_diagnosis_id});setPage('history');return false;">来源诊断：查看诊断详情 #${task.source_diagnosis_id}</a></div>` : `<div class="qa-meta" style="margin-top:10px;">这是一条手动创建的任务，没有关联来源诊断。</div>`}
+  </div>`;
+
+  html += `<div class="card">
+    ${sectionHeader("当前AI基线（创建任务时）")}
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <span class="badge" style="background:#F5F6F1;">品牌提及：${task.baseline_brand_mentioned === true ? "是" : task.baseline_brand_mentioned === false ? "否" : "--"}</span>
+      <span class="badge" style="background:#F5F6F1;">推荐：${task.baseline_recommended === true ? "是" : task.baseline_recommended === false ? "否" : "--"}</span>
+      <span class="badge" style="background:#F5F6F1;">排名：${task.baseline_rank != null ? "第" + task.baseline_rank + "位" : "--"}</span>
+    </div>
+    ${baselinePerQuery.length > 1 ? `<div class="qa-meta" style="margin-top:8px;">按Query明细</div>${baselinePerQuery.map(q => `<div style="font-size:12.5px;padding:3px 0;">· ${escapeHtml(q.query)}：${q.brand_mentioned?"已提及":"未提及"}</div>`).join("")}` : ""}
+  </div>`;
+
+  html += `<div class="card">
+    ${sectionHeader("内容策略")}
+    <div class="qa-meta" style="margin-top:0;">建议标题</div>
+    <div style="font-size:14px;font-weight:600;margin:4px 0 8px;">${escapeHtml(task.suggested_title || task.title)}</div>
+    ${(task.alt_titles||[]).length ? `<div class="qa-meta" style="margin-top:0;">备选标题</div>${task.alt_titles.map(t=>`<div style="font-size:13px;padding:3px 0;">· ${escapeHtml(t)}</div>`).join("")}` : ""}
+    <div class="qa-meta" style="margin-top:10px;">内容角度</div>
+    <div style="font-size:13px;line-height:1.7;margin-top:4px;">${escapeHtml(task.content_angle || "")}</div>
+    ${(task.key_points||[]).length ? `<div class="qa-meta" style="margin-top:10px;">关键要点</div><div>${task.key_points.map(k=>`<span class="type-tag">${escapeHtml(k)}</span>`).join("")}</div>` : ""}
+  </div>`;
+
+  html += `<div class="card">
+    ${sectionHeader("内容大纲")}
+    ${renderContentOutline(task.outline)}
+  </div>`;
+
+  html += `<div class="card">
+    ${sectionHeader("必须核实的事实")}
+    ${renderContentEntityFacts(task)}
+  </div>`;
+
+  html += `<div class="card">
+    ${sectionHeader("发布管理")}
+    <div class="form-row"><label>目标URL</label><input type="text" value="${escapeHtml(task.target_url||"")}" onchange="updateContentTaskField(${task.id}, {target_url:this.value})" /></div>
+    <div class="form-row"><label>实际发布URL</label><input type="text" value="${escapeHtml(task.published_url||"")}" onchange="updateContentTaskField(${task.id}, {published_url:this.value, status:'published'})" /></div>
+    <div class="qa-meta" style="margin-top:0;">发布时间：${task.published_at || "未发布"}</div>
+  </div>`;
+
+  html += `<div class="card">
+    ${sectionHeader("收录管理")}
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+      <select style="width:auto;" onchange="updateContentTaskField(${task.id}, {index_status:this.value})">
+        ${(state.contentMeta ? state.contentMeta.index_statuses : []).map(s => `<option value="${s.code}" ${task.index_status===s.code?"selected":""}>${escapeHtml(s.label)}</option>`).join("")}
+      </select>
+      <span class="qa-meta" style="margin:0;">检查时间：${task.index_checked_at || "未检查"}</span>
+    </div>
+    <div class="form-row" style="margin-top:8px;"><label>备注</label><input type="text" value="${escapeHtml(task.index_notes||"")}" onchange="updateContentTaskField(${task.id}, {index_notes:this.value})" /></div>
+  </div>`;
+
+  html += `<div class="card">
+    ${sectionHeader("复测管理")}
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+      ${["7","14","30"].map(d => `<button class="btn-ghost" onclick="scheduleContentRetest(${task.id}, ${d})">${d}天后复测</button>`).join("")}
+      <input type="text" id="retest-custom-${task.id}" placeholder="自定义日期 YYYY-MM-DD" style="width:auto;" />
+      <button class="btn-ghost" onclick="scheduleContentRetestCustom(${task.id})">设置</button>
+    </div>
+    <div class="qa-meta" style="margin-top:8px;">复测截止日期：${task.retest_due_at || "未设置"}　状态：${contentMetaLabel("retest_status", task.retest_status)}</div>
+    <div style="margin-top:10px;">
+      <button class="btn" onclick="runContentTaskRetest(${task.id})" ${state.contentRetestRunning ? "disabled" : ""}>
+        ${state.contentRetestRunning ? "复测中…" : "一键复测（真实调用DeepSeek）"}
+      </button>
+    </div>
+    ${retestPerQuery.length ? `<div class="qa-meta" style="margin-top:10px;">最近一次复测明细</div>${retestPerQuery.map(q=>`<div style="font-size:12.5px;padding:3px 0;">· ${escapeHtml(q.query)}：${q.brand_mentioned?"已提及":"未提及"}${q.rank!=null?"　第"+q.rank+"位":""}</div>`).join("")}` : ""}
+  </div>`;
+
+  if (comparison) {
+    const verdictColor = comparison.verdict === "结果改善" ? "#0E8C7F" : comparison.verdict === "结果下降" ? "#B23A2E" : "#6B6E64";
+    html += `<div class="card">
+      ${sectionHeader("发布前 vs 复测后对比")}
+      <div style="display:flex;gap:20px;flex-wrap:wrap;">
+        <div>
+          <div class="qa-meta" style="margin-top:0;">发布前</div>
+          <div style="font-size:13px;">提及：${comparison.baseline_mentioned_count}/${comparison.total_queries}　推荐：${comparison.baseline_recommended_count}/${comparison.total_queries}</div>
+        </div>
+        <div>
+          <div class="qa-meta" style="margin-top:0;">复测后</div>
+          <div style="font-size:13px;">提及：${comparison.retest_mentioned_count}/${comparison.total_queries}　推荐：${comparison.retest_recommended_count}/${comparison.total_queries}</div>
+        </div>
+      </div>
+      <div style="margin-top:10px;"><span class="badge" style="background:${verdictColor}10;color:${verdictColor};"><span class="d" style="background:${verdictColor};"></span>${comparison.verdict}</span></div>
+    </div>`;
+  }
+
+  html += `<div class="card">${sectionHeader("备注")}
+    <textarea rows="3" onchange="updateContentTaskField(${task.id}, {notes:this.value})">${escapeHtml(task.notes||"")}</textarea>
+  </div>`;
+
+  return html;
+}
+
+function scheduleContentRetest(taskId, days) {
+  const due = new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
+  updateContentTaskField(taskId, { retest_due_at: due, retest_status: "waiting", status: "waiting_retest" });
+}
+function scheduleContentRetestCustom(taskId) {
+  const input = document.getElementById(`retest-custom-${taskId}`);
+  const v = input && input.value.trim();
+  if (!v) return;
+  updateContentTaskField(taskId, { retest_due_at: v, retest_status: "waiting", status: "waiting_retest" });
+}
+
+function renderContentPreviewModal() {
+  const p = state.contentPreview;
+  if (!p) return "";
+  const s = p.suggestion;
+  return `<div class="modal-overlay" onclick="if(event.target===this) closeContentPreview()">
+    <div class="modal-box">
+      <h3>加入内容矩阵 — 确认信息</h3>
+      <div class="form-row"><label>标题</label><input type="text" value="${escapeHtml(s.title)}" onchange="editContentPreviewField('title', this.value)" /></div>
+      <div style="display:flex;gap:10px;">
+        <div class="form-row" style="flex:1;"><label>内容集群</label><input type="text" value="${escapeHtml(contentMetaLabel('cluster', s.content_cluster))}" disabled /></div>
+        <div class="form-row" style="flex:1;"><label>优先级</label>
+          <select onchange="editContentPreviewField('priority', this.value)">
+            ${["P1","P2","P3"].map(pr => `<option value="${pr}" ${s.priority===pr?"selected":""}>${pr}</option>`).join("")}
+          </select>
+        </div>
+      </div>
+      <div class="qa-meta" style="margin-top:0;">目标Query</div>
+      <div style="font-size:13px;margin:4px 0 8px;">${escapeHtml(s.target_query || "-")}</div>
+      <div class="qa-meta" style="margin-top:0;">当前基线</div>
+      <div style="display:flex;gap:8px;margin:4px 0 8px;flex-wrap:wrap;">
+        <span class="badge" style="background:#F5F6F1;">品牌提及：${s.baseline_brand_mentioned?"是":"否"}</span>
+        <span class="badge" style="background:#F5F6F1;">推荐：${s.baseline_recommended?"是":"否"}</span>
+        <span class="badge" style="background:#F5F6F1;">排名：${s.baseline_rank!=null?s.baseline_rank:"--"}</span>
+      </div>
+      <div class="qa-meta" style="margin-top:0;">对应GEO Gap</div>
+      <div style="margin:4px 0 8px;">${(s.geo_gaps||[]).map(g=>`<span class="type-tag">${escapeHtml(g)}</span>`).join("") || "无"}</div>
+      <div class="qa-meta" style="margin-top:0;">建议内容角度</div>
+      <div style="font-size:13px;margin:4px 0 8px;">${escapeHtml(s.content_angle || "")}</div>
+
+      ${p.similar_tasks.length ? `
+        <div style="background:#C7860714;border-radius:8px;padding:10px 12px;margin-top:10px;">
+          <div style="font-size:13px;font-weight:600;color:#C78607;margin-bottom:6px;">发现相似内容任务</div>
+          ${p.similar_tasks.map(t => `
+            <label style="display:flex;align-items:center;gap:8px;font-size:13px;padding:4px 0;">
+              <input type="radio" name="merge-target" value="${t.id}" ${p.mergeTargetId===t.id?"checked":""} onchange="setContentPreviewMerge(this.value)" />
+              《${escapeHtml(t.title)}》相似度 ${Math.round(t.similarity*100)}%
+            </label>
+          `).join("")}
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;padding:4px 0;">
+            <input type="radio" name="merge-target" value="" ${!p.mergeTargetId?"checked":""} onchange="setContentPreviewMerge('')" />
+            不合并，创建新任务
+          </label>
+        </div>
+      ` : ""}
+
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+        <button class="btn-ghost" onclick="closeContentPreview()">取消</button>
+        <button class="btn" onclick="confirmContentPreview()">${p.mergeTargetId ? "合并到现有任务" : "创建内容任务"}</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderContentBatchModal() {
+  const b = state.contentBatch;
+  if (!b) return "";
+  return `<div class="modal-overlay" onclick="if(event.target===this) closeBatchSuggestModal()">
+    <div class="modal-box" style="max-width:720px;">
+      <h3>生成内容矩阵建议</h3>
+      <div class="qa-meta" style="margin-top:0;">已把相似的未覆盖Query聚合成 ${b.suggestions.length} 条建议，勾选后批量加入内容矩阵。</div>
+      <div style="max-height:400px;overflow-y:auto;margin-top:10px;">
+        ${b.suggestions.map((s, i) => `
+          <div style="border:1px solid #E4E6DE;border-radius:8px;padding:10px 12px;margin-bottom:8px;">
+            <label style="display:flex;gap:8px;align-items:flex-start;cursor:pointer;">
+              <input type="checkbox" ${b.selected.has(i)?"checked":""} onchange="toggleBatchSuggestSelected(${i})" style="margin-top:3px;" />
+              <span>
+                ${contentPriorityBadge(s.priority)}
+                <b>${escapeHtml(s.title)}</b>
+                <div class="qa-meta" style="margin-top:2px;">覆盖Query：${s.covered_query_count}　对应Gap：${(s.geo_gaps||[]).join("、") || "无"}</div>
+              </span>
+            </label>
+          </div>
+        `).join("")}
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;">
+        <button class="btn-ghost" onclick="closeBatchSuggestModal()">取消</button>
+        <button class="btn" onclick="confirmBatchSuggest()">批量加入内容矩阵（已选 ${b.selected.size} 条）</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function renderContentMatrix() {
+  // 注意：预览弹窗/批量建议弹窗是全局的，由主 render() 统一追加，这里不重复渲染。
+  if (state.contentTaskDetail) {
+    return renderContentTaskDetailView(state.contentTaskDetail.task, state.contentTaskDetail.comparison);
+  }
+
+  let html = "";
+  if (state.contentMessages) {
+    html += `<div class="banner-error">${state.contentMessages.map(m => escapeHtml(m)).join("<br/>")}</div>`;
+  }
+  html += renderContentDashboardCards();
+  html += renderContentFiltersBar();
+
+  const tasks = state.contentTasks;
+  if (tasks === null) {
+    html += `<div class="card"><div class="qa-meta">加载中…</div></div>`;
+  } else {
+    html += state.contentView === "kanban" ? renderContentTaskKanbanView(tasks) : renderContentTaskListView(tasks);
+  }
+
+  return html;
+}
+
 function renderSettings() {
   const cur = d();
   return `<div class="card"><h3>系统信息</h3>
@@ -1233,13 +1985,17 @@ function render() {
     tutorial: renderTutorial,
     competitors: renderCompetitors,
     citations: () => emptyState("暂无引用来源数据","完成真实AI平台诊断后，将在此展示各平台回答中引用的来源站点及频次。"),
-    content: () => emptyState("暂无爆款内容公式","需先在「引用来源」中积累被多平台引用的文章数据，才能提炼内容优化建议。"),
+    content: renderContentMatrix,
     history: renderHistoryPage,
     reports: () => emptyState("暂无可用报告","生成报告需要先完成至少一次真实AI平台诊断。"),
     platforms: renderPlatforms,
     settings: renderSettings,
   };
-  document.getElementById("content").innerHTML = routes[state.page]();
+  // "加入内容矩阵"预览弹窗 / 批量建议弹窗 是全局的：可能从深度诊断、快速诊断等
+  // 任意页面触发，不能只挂在GEO内容矩阵自己的页面里，否则从别的页面点开时
+  // 弹窗压根不会被渲染出来。
+  document.getElementById("content").innerHTML =
+    routes[state.page]() + renderContentPreviewModal() + renderContentBatchModal();
 }
 
 /* ---------------- 启动 ---------------- */
