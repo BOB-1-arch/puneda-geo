@@ -89,6 +89,19 @@ def ask_deepseek(req: AskRequest):
             detail="DEEPSEEK_API_KEY 未在服务器环境变量中配置，请参考 README 完成配置",
         )
 
+    try:
+        DEEPSEEK_API_KEY.encode("ascii")
+    except UnicodeEncodeError:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "DEEPSEEK_API_KEY 里混入了非ASCII字符（常见原因：手机端复制粘贴时被输入法"
+                "自动转成了全角字符，肉眼看起来一样但实际编码不同）。请去DeepSeek开放平台"
+                "重新复制一份Key，在服务器上用 `sudo nano .env` 直接编辑替换后，"
+                "执行 `sudo systemctl restart puneda-geo` 重启服务。"
+            ),
+        )
+
     if req.model not in VALID_DEEPSEEK_MODELS:
         raise HTTPException(
             status_code=400,
@@ -116,6 +129,11 @@ def ask_deepseek(req: AskRequest):
         )
     except requests.RequestException as e:
         raise HTTPException(status_code=502, detail=f"请求 DeepSeek API 失败：{e}")
+    except UnicodeEncodeError as e:
+        # 兜底：理论上上面对Key的ASCII校验已经能提前拦住最常见的情况，这里防止
+        # 其他未预料到的字段（如请求头相关配置）里混入非ASCII字符时，用户看到的
+        # 还是一堆看不懂的Python报错（对应500），而不是明确的错误提示。
+        raise HTTPException(status_code=500, detail=f"请求头包含无法识别的字符：{e}")
 
     if resp.status_code != 200:
         raise HTTPException(
