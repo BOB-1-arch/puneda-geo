@@ -1,0 +1,21 @@
+# Render.com 一键部署配置。
+# 用法：在 Render 后台选择 "New +" -> "Blueprint"，连接这个GitHub仓库，
+# Render 会自动读取这个文件建出服务，你只需要手动填一个环境变量：DEEPSEEK_API_KEY。
+#
+# 免费套餐说明（如实告知，不夸大）：
+# - 15分钟无请求会自动休眠，下次访问有约30-60秒唤醒延迟，属于正常现象。
+# - 免费套餐磁盘不保证持久化，服务重新构建/长时间休眠后 geo_diagnosis.db 里的
+#   诊断历史可能被清空——如果诊断历史需要长期保留，需要升级到带Persistent Disk
+#   的付费套餐（在 Render 后台该服务的 Disks 里加一个磁盘，并把 GEO_DB_PATH
+#   环境变量指到磁盘挂载路径下即可，代码已经支持 GEO_DB_PATH 覆盖默认位置）。
+
+services:
+  - type: web
+    name: puneda-geo
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DEEPSEEK_API_KEY
+        sync: false
